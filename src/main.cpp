@@ -8,14 +8,24 @@
 #include "drivers/sdcard.h"
 
 #include "ui/browser.h"
+#include "ui/menu.h"
+#include "ui/play_screen.h"
 
 #define CALIBRATION_PRESSED_THRESHOLD 900
 #define CALIBRATION_RELEASED_THRESHOLD 900
 #define FORCE_CALIBRATION_RIGHT_THRESHOLD 50
 
+typedef enum
+{
+    APP_SCREEN_BROWSER = 0,
+    APP_SCREEN_PLAY_STUB,
+    APP_SCREEN_MENU
+} app_screen_t;
+
 static uint32_t last_lcd_update_ms = 0;
 
 static bool sd_ok = false;
+static app_screen_t current_screen = APP_SCREEN_BROWSER;
 
 static void lcd_print_line(uint8_t row, const char *text)
 {
@@ -170,6 +180,80 @@ static bool run_keypad_calibration(keypad_calibration_t *calibration)
     return saved;
 }
 
+static void app_enter_browser(void)
+{
+    browser_restore_saved_position();
+    current_screen = APP_SCREEN_BROWSER;
+    lcd_clear();
+}
+
+static void app_enter_play_stub(const char *filename)
+{
+    browser_save_position();
+    play_screen_init(filename);
+    current_screen = APP_SCREEN_PLAY_STUB;
+    lcd_clear();
+}
+
+static void app_enter_menu(void)
+{
+    browser_save_position();
+    current_screen = APP_SCREEN_MENU;
+    lcd_clear();
+}
+
+static void app_handle_browser_event(button_event_t event)
+{
+    browser_action_t action = browser_handle_event(event);
+
+    switch (action)
+    {
+        case BROWSER_ACTION_FILE_SELECTED:
+            app_enter_play_stub(browser_get_selected_name());
+            break;
+
+        case BROWSER_ACTION_MENU_REQUESTED:
+            app_enter_menu();
+            break;
+
+        case BROWSER_ACTION_NONE:
+        default:
+            break;
+    }
+}
+
+static void app_handle_play_stub_event(button_event_t event)
+{
+    play_screen_action_t action = play_screen_handle_event(event);
+
+    switch (action)
+    {
+        case PLAY_SCREEN_ACTION_BACK:
+            app_enter_browser();
+            break;
+
+        case PLAY_SCREEN_ACTION_NONE:
+        default:
+            break;
+    }
+}
+
+static void app_handle_menu_event(button_event_t event)
+{
+    menu_action_t action = menu_handle_event(event);
+
+    switch (action)
+    {
+        case MENU_ACTION_BACK:
+            app_enter_browser();
+            break;
+
+        case MENU_ACTION_NONE:
+        default:
+            break;
+    }
+}
+
 void setup()
 {
     sdcard_early_prepare_pins();
@@ -236,6 +320,10 @@ void setup()
     lcd_print_line(1, "PLEASE WAIT");
 
     browser_init(sd_ok);
+    play_screen_init(NULL);
+    menu_init();
+
+    current_screen = APP_SCREEN_BROWSER;
 
     delay(700);
 
@@ -248,7 +336,24 @@ void loop()
 
     if (event != BUTTON_EVENT_NONE)
     {
-        browser_handle_event(event);
+        switch (current_screen)
+        {
+            case APP_SCREEN_BROWSER:
+                app_handle_browser_event(event);
+                break;
+
+            case APP_SCREEN_PLAY_STUB:
+                app_handle_play_stub_event(event);
+                break;
+
+            case APP_SCREEN_MENU:
+                app_handle_menu_event(event);
+                break;
+
+            default:
+                app_enter_browser();
+                break;
+        }
     }
 
     uint32_t now = millis();
@@ -257,6 +362,23 @@ void loop()
     {
         last_lcd_update_ms = now;
 
-        browser_render();
+        switch (current_screen)
+        {
+            case APP_SCREEN_BROWSER:
+                browser_render();
+                break;
+
+            case APP_SCREEN_PLAY_STUB:
+                play_screen_render();
+                break;
+
+            case APP_SCREEN_MENU:
+                menu_render();
+                break;
+
+            default:
+                app_enter_browser();
+                break;
+        }
     }
 }

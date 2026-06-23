@@ -9,6 +9,7 @@
 
 #define MAX_DIR_ENTRIES 999
 #define BROWSER_PATH_MAX 96
+#define BROWSER_NAME_MAX 64
 #define MESSAGE_HOLD_MS 1200
 
 static bool sd_ok = false;
@@ -18,6 +19,12 @@ static uint16_t selected_index = 0;
 
 static char current_path[BROWSER_PATH_MAX] = "/";
 static sdcard_entry_t current_entry;
+
+static bool saved_position_valid = false;
+static char saved_path[BROWSER_PATH_MAX] = "/";
+static char saved_name[BROWSER_NAME_MAX];
+static bool saved_is_dir = false;
+static uint16_t saved_index = 0;
 
 static char status_message[17];
 static uint32_t status_message_until_ms = 0;
@@ -35,6 +42,7 @@ static void lcd_print_line(uint8_t row, const char *text)
 static void show_message(const char *line0, const char *line1, uint16_t hold_ms)
 {
     lcd_clear();
+
     lcd_print_line(0, line0);
     lcd_print_line(1, line1);
 
@@ -108,13 +116,65 @@ static void browser_build_dir_index(void)
     browser_load_current_entry();
 }
 
+static bool browser_find_saved_position(void)
+{
+    sdcard_entry_t entry;
+
+    if (!saved_position_valid || !sd_ok || dir_count == 0)
+    {
+        return false;
+    }
+
+    if (strcmp(current_path, saved_path) != 0)
+    {
+        return false;
+    }
+
+    if (saved_index < dir_count)
+    {
+        memset(&entry, 0, sizeof(entry));
+
+        if (sdcard_read_entry_by_index(current_path, saved_index, &entry))
+        {
+            if ((entry.is_dir == saved_is_dir) && (strcmp(entry.name, saved_name) == 0))
+            {
+                selected_index = saved_index;
+                browser_load_current_entry();
+                return true;
+            }
+        }
+    }
+
+    for (uint16_t index = 0; index < dir_count; index++)
+    {
+        memset(&entry, 0, sizeof(entry));
+
+        if (!sdcard_read_entry_by_index(current_path, index, &entry))
+        {
+            continue;
+        }
+
+        if ((entry.is_dir == saved_is_dir) && (strcmp(entry.name, saved_name) == 0))
+        {
+            selected_index = index;
+            browser_load_current_entry();
+            return true;
+        }
+    }
+
+    return false;
+}
+
 static void browser_refresh_sd(void)
 {
+    browser_save_position();
+
     show_message("SD INIT", "PLEASE WAIT", 300);
 
     sd_ok = sdcard_init();
 
     browser_build_dir_index();
+    browser_find_saved_position();
 
     lcd_clear();
 }
@@ -125,6 +185,7 @@ static void browser_go_root(void)
     current_path[sizeof(current_path) - 1] = '\0';
 
     selected_index = 0;
+    saved_position_valid = false;
 
     browser_build_dir_index();
 
@@ -157,6 +218,7 @@ static void browser_go_parent(void)
     }
 
     selected_index = 0;
+    saved_position_valid = false;
 
     browser_build_dir_index();
 
@@ -196,6 +258,7 @@ static bool browser_enter_directory(const char *name)
     current_path[sizeof(current_path) - 1] = '\0';
 
     selected_index = 0;
+    saved_position_valid = false;
 
     browser_build_dir_index();
 
@@ -240,28 +303,29 @@ static void browser_move_down(void)
     browser_load_current_entry();
 }
 
-static void browser_select_current(void)
+static browser_action_t browser_select_current(void)
 {
     if (!sd_ok)
     {
         browser_refresh_sd();
-        return;
+        return BROWSER_ACTION_NONE;
     }
 
     if (dir_count == 0)
     {
         set_status_message("EMPTY DIR");
-        return;
+        return BROWSER_ACTION_NONE;
     }
 
     if (current_entry.is_dir)
     {
         browser_enter_directory(current_entry.name);
+        return BROWSER_ACTION_NONE;
     }
-    else
-    {
-        set_status_message("FILE SELECT");
-    }
+
+    set_status_message("FILE SELECT");
+
+    return BROWSER_ACTION_FILE_SELECTED;
 }
 
 static void browser_make_path_label(char *out, size_t out_size)
@@ -306,49 +370,55 @@ void browser_init(bool initial_sd_ok)
 
     memset(&current_entry, 0, sizeof(current_entry));
 
+    saved_position_valid = false;
+    saved_path[0] = '\0';
+    saved_name[0] = '\0';
+    saved_is_dir = false;
+    saved_index = 0;
+
     status_message[0] = '\0';
     status_message_until_ms = 0;
 
     browser_build_dir_index();
 }
 
-void browser_handle_event(button_event_t event)
+browser_action_t browser_handle_event(button_event_t event)
 {
     switch (event)
     {
         case BUTTON_EVENT_UP_PRESS:
         case BUTTON_EVENT_UP_REPEAT:
             browser_move_up();
-            break;
+            return BROWSER_ACTION_NONE;
 
         case BUTTON_EVENT_DOWN_PRESS:
         case BUTTON_EVENT_DOWN_REPEAT:
             browser_move_down();
-            break;
+            return BROWSER_ACTION_NONE;
 
         case BUTTON_EVENT_LEFT_SHORT:
             browser_go_parent();
-            break;
+            return BROWSER_ACTION_NONE;
 
         case BUTTON_EVENT_LEFT_LONG:
             browser_go_root();
-            break;
+            return BROWSER_ACTION_NONE;
 
         case BUTTON_EVENT_RIGHT_SHORT:
             browser_refresh_sd();
-            break;
+            return BROWSER_ACTION_NONE;
 
         case BUTTON_EVENT_SELECT_SHORT:
-            browser_select_current();
-            break;
+            return browser_select_current();
 
         case BUTTON_EVENT_SELECT_LONG:
-            set_status_message("MENU TODO");
-            break;
+            return BROWSER_ACTION_MENU_REQUESTED;
 
         default:
             break;
     }
+
+    return BROWSER_ACTION_NONE;
 }
 
 void browser_render(void)
@@ -463,4 +533,30 @@ const char* browser_get_selected_name(void)
 bool browser_selected_is_directory(void)
 {
     return current_entry.is_dir;
+}
+
+void browser_save_position(void)
+{
+    strncpy(saved_path, current_path, sizeof(saved_path) - 1);
+    saved_path[sizeof(saved_path) - 1] = '\0';
+
+    strncpy(saved_name, current_entry.name, sizeof(saved_name) - 1);
+    saved_name[sizeof(saved_name) - 1] = '\0';
+
+    saved_is_dir = current_entry.is_dir;
+    saved_index = selected_index;
+    saved_position_valid = true;
+}
+
+void browser_restore_saved_position(void)
+{
+    if (!saved_position_valid)
+    {
+        return;
+    }
+
+    if (!browser_find_saved_position())
+    {
+        browser_load_current_entry();
+    }
 }
