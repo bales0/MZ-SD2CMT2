@@ -1,8 +1,6 @@
 #include <Arduino.h>
 #include <stdio.h>
-
 #include "menu.h"
-
 #include "../drivers/lcd.h"
 
 typedef enum
@@ -26,14 +24,7 @@ static void lcd_print_fixed(uint8_t row, const char *text)
 
 static void menu_move_up(void)
 {
-    if (selected_item == MENU_ITEM_PLAY_MODE)
-    {
-        selected_item = MENU_ITEM_INVERT_SIGNAL;
-    }
-    else
-    {
-        selected_item = (menu_item_t)((int)selected_item - 1);
-    }
+    selected_item = (selected_item == MENU_ITEM_PLAY_MODE) ? MENU_ITEM_INVERT_SIGNAL : (menu_item_t)((int)selected_item - 1);
 }
 
 static void menu_move_down(void)

@@ -1,9 +1,7 @@
 #include <Arduino.h>
 #include <stdio.h>
 #include <string.h>
-
 #include "browser.h"
-
 #include "../drivers/lcd.h"
 #include "../drivers/sdcard.h"
 
@@ -17,22 +15,18 @@
 static bool sd_ok = false;
 static uint16_t dir_count = 0;
 static uint16_t selected_index = 0;
-
 static char current_path[BROWSER_PATH_MAX] = "/";
 static sdcard_entry_t current_entry;
 static char selected_full_path[BROWSER_FULL_PATH_MAX];
-
 static bool saved_position_valid = false;
 static char saved_path[BROWSER_PATH_MAX] = "/";
 static char saved_name[BROWSER_NAME_MAX];
 static bool saved_is_dir = false;
 static uint16_t saved_index = 0;
-
 static uint8_t parent_stack_depth = 0;
 static char parent_stack_name[BROWSER_PARENT_STACK_MAX][BROWSER_NAME_MAX];
 static bool parent_stack_is_dir[BROWSER_PARENT_STACK_MAX];
 static uint16_t parent_stack_index[BROWSER_PARENT_STACK_MAX];
-
 static char status_message[17];
 static uint32_t status_message_until_ms = 0;
 
@@ -71,7 +65,6 @@ static void browser_update_selected_full_path(void)
         selected_full_path[0] = '\0';
         return;
     }
-
     if (browser_is_root())
     {
         snprintf(selected_full_path, sizeof(selected_full_path), "/%s", current_entry.name);
@@ -85,7 +78,6 @@ static void browser_update_selected_full_path(void)
 static void browser_load_current_entry(void)
 {
     memset(&current_entry, 0, sizeof(current_entry));
-
     if (!sd_ok)
     {
         strncpy(current_entry.name, sdcard_last_error(), sizeof(current_entry.name) - 1);
@@ -95,7 +87,6 @@ static void browser_load_current_entry(void)
         browser_update_selected_full_path();
         return;
     }
-
     if (dir_count == 0)
     {
         strncpy(current_entry.name, "EMPTY", sizeof(current_entry.name) - 1);
@@ -105,12 +96,10 @@ static void browser_load_current_entry(void)
         browser_update_selected_full_path();
         return;
     }
-
     if (selected_index >= dir_count)
     {
         selected_index = 0;
     }
-
     if (!sdcard_read_entry_by_index(current_path, selected_index, &current_entry))
     {
         strncpy(current_entry.name, sdcard_last_error(), sizeof(current_entry.name) - 1);
@@ -118,7 +107,6 @@ static void browser_load_current_entry(void)
         current_entry.is_dir = false;
         current_entry.size = 0;
     }
-
     browser_update_selected_full_path();
 }
 
@@ -134,19 +122,16 @@ static void browser_build_dir_index(void)
         dir_count = 0;
         selected_index = 0;
     }
-
     browser_load_current_entry();
 }
 
 static bool browser_restore_entry_by_identity(const char *name, bool is_dir, uint16_t preferred_index)
 {
     sdcard_entry_t entry;
-
     if ((name == NULL) || !sd_ok || (dir_count == 0))
     {
         return false;
     }
-
     if (preferred_index < dir_count)
     {
         memset(&entry, 0, sizeof(entry));
@@ -160,7 +145,6 @@ static bool browser_restore_entry_by_identity(const char *name, bool is_dir, uin
             }
         }
     }
-
     for (uint16_t index = 0; index < dir_count; index++)
     {
         memset(&entry, 0, sizeof(entry));
@@ -168,7 +152,6 @@ static bool browser_restore_entry_by_identity(const char *name, bool is_dir, uin
         {
             continue;
         }
-
         if ((entry.is_dir == is_dir) && (strcmp(entry.name, name) == 0))
         {
             selected_index = index;
@@ -176,7 +159,6 @@ static bool browser_restore_entry_by_identity(const char *name, bool is_dir, uin
             return true;
         }
     }
-
     return false;
 }
 
@@ -186,12 +168,10 @@ static bool browser_find_saved_position(void)
     {
         return false;
     }
-
     if (strcmp(current_path, saved_path) != 0)
     {
         return false;
     }
-
     return browser_restore_entry_by_identity(saved_name, saved_is_dir, saved_index);
 }
 
@@ -201,7 +181,6 @@ static void browser_push_parent_position(void)
     {
         return;
     }
-
     strncpy(parent_stack_name[parent_stack_depth], current_entry.name, sizeof(parent_stack_name[parent_stack_depth]) - 1);
     parent_stack_name[parent_stack_depth][sizeof(parent_stack_name[parent_stack_depth]) - 1] = '\0';
     parent_stack_is_dir[parent_stack_depth] = current_entry.is_dir;
@@ -215,13 +194,8 @@ static bool browser_pop_parent_position_and_restore(void)
     {
         return false;
     }
-
     parent_stack_depth--;
-    return browser_restore_entry_by_identity(
-        parent_stack_name[parent_stack_depth],
-        parent_stack_is_dir[parent_stack_depth],
-        parent_stack_index[parent_stack_depth]
-    );
+    return browser_restore_entry_by_identity(parent_stack_name[parent_stack_depth], parent_stack_is_dir[parent_stack_depth], parent_stack_index[parent_stack_depth]);
 }
 
 static void browser_refresh_sd(void)
@@ -250,14 +224,12 @@ static void browser_go_parent(void)
     {
         return;
     }
-
     char *last_slash = strrchr(current_path, '/');
     if (last_slash == NULL)
     {
         browser_go_root();
         return;
     }
-
     if (last_slash == current_path)
     {
         current_path[1] = '\0';
@@ -266,7 +238,6 @@ static void browser_go_parent(void)
     {
         *last_slash = '\0';
     }
-
     selected_index = 0;
     saved_position_valid = false;
     browser_build_dir_index();
@@ -279,7 +250,6 @@ static bool browser_enter_directory(const char *name)
     {
         return false;
     }
-
     char new_path[BROWSER_PATH_MAX];
     if (browser_is_root())
     {
@@ -289,15 +259,12 @@ static bool browser_enter_directory(const char *name)
     {
         snprintf(new_path, sizeof(new_path), "%s/%s", current_path, name);
     }
-
     if (strlen(new_path) >= sizeof(current_path))
     {
         set_status_message("PATH TOO LONG");
         return false;
     }
-
     browser_push_parent_position();
-
     strncpy(current_path, new_path, sizeof(current_path) - 1);
     current_path[sizeof(current_path) - 1] = '\0';
     selected_index = 0;
@@ -312,16 +279,7 @@ static void browser_move_up(void)
     {
         return;
     }
-
-    if (selected_index == 0)
-    {
-        selected_index = dir_count - 1;
-    }
-    else
-    {
-        selected_index--;
-    }
-
+    selected_index = (selected_index == 0) ? (dir_count - 1) : (selected_index - 1);
     browser_load_current_entry();
 }
 
@@ -331,13 +289,11 @@ static void browser_move_down(void)
     {
         return;
     }
-
     selected_index++;
     if (selected_index >= dir_count)
     {
         selected_index = 0;
     }
-
     browser_load_current_entry();
 }
 
@@ -348,19 +304,16 @@ static browser_action_t browser_select_current(void)
         browser_refresh_sd();
         return BROWSER_ACTION_NONE;
     }
-
     if (dir_count == 0)
     {
         set_status_message("EMPTY DIR");
         return BROWSER_ACTION_NONE;
     }
-
     if (current_entry.is_dir)
     {
         browser_enter_directory(current_entry.name);
         return BROWSER_ACTION_NONE;
     }
-
     set_status_message("FILE SELECT");
     return BROWSER_ACTION_FILE_SELECTED;
 }
@@ -371,20 +324,17 @@ static void browser_make_path_label(char *out, size_t out_size)
     {
         return;
     }
-
     if (browser_is_root())
     {
         snprintf(out, out_size, "/");
         return;
     }
-
     const char *last_slash = strrchr(current_path, '/');
     if ((last_slash == NULL) || (*(last_slash + 1) == '\0'))
     {
         snprintf(out, out_size, "/");
         return;
     }
-
     snprintf(out, out_size, "%s", last_slash + 1);
 }
 
@@ -522,7 +472,6 @@ void browser_restore_saved_position(void)
     {
         return;
     }
-
     if (!browser_find_saved_position())
     {
         browser_load_current_entry();

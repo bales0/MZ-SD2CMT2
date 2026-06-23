@@ -7,6 +7,7 @@
 #include "drivers/calibration_store.h"
 #include "drivers/sdcard.h"
 
+#include "play/play_controller.h"
 #include "ui/browser.h"
 #include "ui/menu.h"
 #include "ui/play_screen.h"
@@ -156,7 +157,7 @@ static void app_enter_browser(void)
 static void app_enter_play_stub(const char *filename, const char *full_path)
 {
     browser_save_position();
-    play_screen_init(filename, full_path, menu_get_play_mode(), menu_get_invert_signal());
+    play_controller_start_session(filename, full_path, menu_get_play_mode(), menu_get_invert_signal());
     current_screen = APP_SCREEN_PLAY_STUB;
     lcd_clear();
 }
@@ -188,9 +189,18 @@ static void app_handle_browser_event(button_event_t event)
 static void app_handle_play_stub_event(button_event_t event)
 {
     play_screen_action_t action = play_screen_handle_event(event);
-    if (action == PLAY_SCREEN_ACTION_BACK)
+    switch (action)
     {
-        app_enter_browser();
+        case PLAY_SCREEN_ACTION_TOGGLE_PLAY:
+            play_controller_toggle_play_pause();
+            break;
+        case PLAY_SCREEN_ACTION_BACK:
+            play_controller_stop();
+            app_enter_browser();
+            break;
+        case PLAY_SCREEN_ACTION_NONE:
+        default:
+            break;
     }
 }
 
@@ -237,7 +247,7 @@ void setup()
 
     browser_init(sd_ok);
     menu_init();
-    play_screen_init(NULL, NULL, MENU_PLAY_MODE_NORMAL, false);
+    play_controller_init();
     current_screen = APP_SCREEN_BROWSER;
 
     lcd_clear();
@@ -275,8 +285,12 @@ void loop()
                 browser_render();
                 break;
             case APP_SCREEN_PLAY_STUB:
-                play_screen_render();
+            {
+                play_controller_view_t view;
+                play_controller_get_view(&view);
+                play_screen_render(&view);
                 break;
+            }
             case APP_SCREEN_MENU:
                 menu_render();
                 break;

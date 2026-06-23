@@ -1,7 +1,6 @@
 #include <ctype.h>
 #include <stddef.h>
 #include <string.h>
-
 #include "file_format.h"
 
 static bool chars_equal_ignore_case(char a, char b)
@@ -15,17 +14,13 @@ static bool extension_equals(const char *filename, const char *extension)
     {
         return false;
     }
-
     size_t filename_len = strlen(filename);
     size_t extension_len = strlen(extension);
-
     if (filename_len < extension_len)
     {
         return false;
     }
-
     const char *filename_extension = filename + filename_len - extension_len;
-
     for (size_t i = 0; i < extension_len; i++)
     {
         if (!chars_equal_ignore_case(filename_extension[i], extension[i]))
@@ -33,7 +28,6 @@ static bool extension_equals(const char *filename, const char *extension)
             return false;
         }
     }
-
     return true;
 }
 
