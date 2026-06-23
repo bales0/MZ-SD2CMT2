@@ -1,21 +1,21 @@
 #include <Arduino.h>
 #include <stdio.h>
+#include <string.h>
 
 #include "drivers/lcd.h"
 #include "drivers/keypad.h"
 #include "drivers/calibration_store.h"
+#include "drivers/sdcard.h"
 
-#define EVENT_DISPLAY_HOLD_MS 1200
+#include "ui/browser.h"
 
 #define CALIBRATION_PRESSED_THRESHOLD 900
 #define CALIBRATION_RELEASED_THRESHOLD 900
-
 #define FORCE_CALIBRATION_RIGHT_THRESHOLD 50
 
 static uint32_t last_lcd_update_ms = 0;
 
-static button_event_t displayed_event = BUTTON_EVENT_NONE;
-static uint32_t displayed_event_time_ms = 0;
+static bool sd_ok = false;
 
 static void lcd_print_line(uint8_t row, const char *text)
 {
@@ -104,13 +104,6 @@ static uint16_t calibrate_button(const char *name)
 
 static bool force_calibration_requested(void)
 {
-    /*
-        Nouzové vynucení kalibrace:
-        držet RIGHT při resetu.
-
-        RIGHT má na tomto keypad modulu ADC okolo 0.
-        Nepoužíváme žádný servisní pin A1.
-    */
     if (keypad_read_raw() <= FORCE_CALIBRATION_RIGHT_THRESHOLD)
     {
         return true;
@@ -129,6 +122,7 @@ static bool run_keypad_calibration(keypad_calibration_t *calibration)
     lcd_clear();
     lcd_print_line(0, "KEYPAD");
     lcd_print_line(1, "CALIBRATION");
+
     delay(1200);
 
     calibration->none = calibrate_none();
@@ -178,6 +172,10 @@ static bool run_keypad_calibration(keypad_calibration_t *calibration)
 
 void setup()
 {
+    sdcard_early_prepare_pins();
+
+    sd_ok = sdcard_init();
+
     lcd_init();
     keypad_init();
 
@@ -215,10 +213,18 @@ void setup()
     else
     {
         lcd_set_cursor(0, 0);
-        lcd_print("CAL: EEPROM OK ");
+
+        if (sd_ok)
+        {
+            lcd_print("SD EARLY OK    ");
+        }
+        else
+        {
+            lcd_print("SD EARLY FAIL  ");
+        }
 
         lcd_set_cursor(0, 1);
-        lcd_print("KEYPAD READY   ");
+        lcd_print("DIR BROWSER    ");
 
         delay(1200);
     }
@@ -226,58 +232,31 @@ void setup()
     keypad_set_calibration(&calibration);
 
     lcd_clear();
+    lcd_print_line(0, "DIR LOAD");
+    lcd_print_line(1, "PLEASE WAIT");
 
-    lcd_set_cursor(0, 0);
-    lcd_print("BTN:NONE");
+    browser_init(sd_ok);
 
-    lcd_set_cursor(0, 1);
-    lcd_print("EV :");
+    delay(700);
+
+    lcd_clear();
 }
 
 void loop()
 {
-    uint32_t now = millis();
-
     button_event_t event = keypad_get_event();
 
     if (event != BUTTON_EVENT_NONE)
     {
-        displayed_event = event;
-        displayed_event_time_ms = now;
+        browser_handle_event(event);
     }
 
-    if ((now - displayed_event_time_ms) > EVENT_DISPLAY_HOLD_MS)
-    {
-        displayed_event = BUTTON_EVENT_NONE;
-    }
+    uint32_t now = millis();
 
-    if ((now - last_lcd_update_ms) >= 50)
+    if ((now - last_lcd_update_ms) >= 120)
     {
         last_lcd_update_ms = now;
 
-        button_t button = keypad_get_button();
-
-        char line0[17];
-        char line1[17];
-
-        snprintf(
-            line0,
-            sizeof(line0),
-            "BTN:%-12s",
-            keypad_button_name(button)
-        );
-
-        snprintf(
-            line1,
-            sizeof(line1),
-            "EV :%-12s",
-            keypad_event_name(displayed_event)
-        );
-
-        lcd_set_cursor(0, 0);
-        lcd_print(line0);
-
-        lcd_set_cursor(0, 1);
-        lcd_print(line1);
+        browser_render();
     }
 }
