@@ -19,9 +19,7 @@ static bool invert_signal = false;
 static void lcd_print_fixed(uint8_t row, const char *text)
 {
     char line[17];
-
     snprintf(line, sizeof(line), "%-16s", text != NULL ? text : "");
-
     lcd_set_cursor(0, row);
     lcd_print(line);
 }
@@ -48,20 +46,11 @@ static void menu_toggle_current(void)
     switch (selected_item)
     {
         case MENU_ITEM_PLAY_MODE:
-            if (play_mode == MENU_PLAY_MODE_NORMAL)
-            {
-                play_mode = MENU_PLAY_MODE_ULTRA_TURBO;
-            }
-            else
-            {
-                play_mode = MENU_PLAY_MODE_NORMAL;
-            }
+            play_mode = (play_mode == MENU_PLAY_MODE_NORMAL) ? MENU_PLAY_MODE_ULTRA_TURBO : MENU_PLAY_MODE_NORMAL;
             break;
-
         case MENU_ITEM_INVERT_SIGNAL:
             invert_signal = !invert_signal;
             break;
-
         default:
             break;
     }
@@ -82,24 +71,19 @@ menu_action_t menu_handle_event(button_event_t event)
         case BUTTON_EVENT_UP_REPEAT:
             menu_move_up();
             return MENU_ACTION_NONE;
-
         case BUTTON_EVENT_DOWN_PRESS:
         case BUTTON_EVENT_DOWN_REPEAT:
             menu_move_down();
             return MENU_ACTION_NONE;
-
         case BUTTON_EVENT_SELECT_SHORT:
             menu_toggle_current();
             return MENU_ACTION_NONE;
-
         case BUTTON_EVENT_LEFT_SHORT:
         case BUTTON_EVENT_LEFT_LONG:
             return MENU_ACTION_BACK;
-
         default:
             break;
     }
-
     return MENU_ACTION_NONE;
 }
 
@@ -109,30 +93,12 @@ void menu_render(void)
     {
         case MENU_ITEM_PLAY_MODE:
             lcd_print_fixed(0, ">PLAY MODE");
-
-            if (play_mode == MENU_PLAY_MODE_NORMAL)
-            {
-                lcd_print_fixed(1, " NORMAL");
-            }
-            else
-            {
-                lcd_print_fixed(1, " ULTRA TURBO");
-            }
+            lcd_print_fixed(1, play_mode == MENU_PLAY_MODE_NORMAL ? " NORMAL" : " ULTRA TURBO");
             break;
-
         case MENU_ITEM_INVERT_SIGNAL:
             lcd_print_fixed(0, ">INVERT SIG.");
-
-            if (invert_signal)
-            {
-                lcd_print_fixed(1, " ON");
-            }
-            else
-            {
-                lcd_print_fixed(1, " OFF");
-            }
+            lcd_print_fixed(1, invert_signal ? " ON" : " OFF");
             break;
-
         default:
             lcd_print_fixed(0, ">MENU");
             lcd_print_fixed(1, " ERROR");
