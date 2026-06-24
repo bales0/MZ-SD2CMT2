@@ -5,18 +5,24 @@
 #include <stdint.h>
 
 /*
-    Optional Timer1 hardware timing marker for oscilloscope debugging.
+    Hardware-timed WAV sample output on Arduino Mega 2560.
 
-    On Arduino Mega 2560 OC1A is digital pin D11. With this enabled, hardware
-    toggles D11 exactly at every Timer1 sample compare event. Compare D11 to
-    READ D2 on a two-channel scope: their relative displacement is the real
-    output-update latency/jitter. The marker costs zero ISR cycles.
+    READ is D2 / PE4 / OC3B. Timer3 compare B sets or clears this pin in
+    hardware at every sample boundary. The compare-A ISR prepares the next
+    output level 192 CPU clocks (12 us) before that hardware edge.
+
+    Optional diagnostic marker: D3 / PE5 / OC3C toggles at exactly the same
+    Timer3 count as the D2 hardware sample boundary. It is not connected to
+    the CMT interface and is intended only for an oscilloscope probe.
 */
 #ifndef WAV_PLAYBACK_TIMING_MARKER_ENABLE
 #define WAV_PLAYBACK_TIMING_MARKER_ENABLE 1
 #endif
 
-#define WAV_PLAYBACK_TIMING_MARKER_PIN 11U
+#define WAV_PLAYBACK_TIMING_MARKER_PIN 3U
+
+/* Must remain comfortably below the shortest supported sample period. */
+#define WAV_PLAYBACK_TIMER3_PREP_LEAD_TICKS 192U
 
 typedef enum
 {
@@ -45,15 +51,14 @@ uint32_t wav_playback_driver_get_sample_rate(void);
 uint8_t wav_playback_driver_get_read_pin(void);
 
 /*
-    A 16-bit monotonic emission sequence. Foreground code must read it at
-    least once per 65535 samples (the normal main loop does so every pass).
+    A monotonic 16-bit count of sample values armed for hardware output.
+    Foreground code reads it at least once per 65535 samples.
 */
 uint16_t wav_playback_driver_get_emitted_sequence(void);
 
 /*
-    Per-sample software jitter statistics are intentionally disabled: measuring
-    them inside every 44.1/48 kHz ISR consumes the timing budget. Use the
-    hardware D11 marker for the accurate measurement instead.
+    D2 timing is now hardware compare timing, so no software-jitter value is
+    measured in the hot ISR. Probe D2 and the optional D3 marker instead.
 */
 uint16_t wav_playback_driver_get_jitter_ticks(void);
 
