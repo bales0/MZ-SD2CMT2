@@ -1,4 +1,8 @@
-# MZ-SD²CMT
+# MZ-SD2CMT2 - Reborn
+Strongly based on work and ideas of Hlide to improve UI and features of original MZ-SD2CMT.
+
+!!!WORK IN PROGRESS!!!
+
 SD card based CMT for MZ 80K series (MZ-80 K/K2/K2E/C, MZ-80 A, MZ-1200, MZ-700).
 
 ## Parts Used
