@@ -124,6 +124,18 @@ void wav_playback_disable_timer_from_isr(void)
     PORTE &= (uint8_t)~(_BV(PE4) | _BV(PE5));
 }
 
+/*
+    Explicitly restore the physical OC3B/D2 path. This is intentionally not
+    delegated to Arduino pin bookkeeping: the record path may have run before
+    PLAY and hardware compare ownership must be reset deterministically.
+*/
+static inline __attribute__((always_inline))
+void wav_playback_restore_read_output(void)
+{
+    DDRE |= _BV(PE4);
+    PORTE &= (uint8_t)~_BV(PE4);
+}
+
 static void wav_playback_disable_timer_from_foreground(bool hold_read_level)
 {
     ATOMIC_BLOCK(ATOMIC_RESTORESTATE)
@@ -275,6 +287,8 @@ void wav_playback_driver_init(void)
         TIFR3 = (uint8_t)(_BV(OCF3A) | _BV(OCF3B) | _BV(OCF3C));
     }
 
+    wav_playback_restore_read_output();
+
     timer_sample_rate = 0U;
     timer_base_ticks = 0U;
     timer_remainder_ticks = 0U;
@@ -315,6 +329,7 @@ bool wav_playback_driver_prepare(uint32_t sample_rate)
     }
 
     wav_playback_disable_timer_from_foreground(false);
+    wav_playback_restore_read_output();
 
     ATOMIC_BLOCK(ATOMIC_RESTORESTATE)
     {
@@ -355,6 +370,7 @@ bool wav_playback_driver_start(void)
         return false;
     }
 
+    wav_playback_restore_read_output();
     wav_playback_start_timer_from_foreground();
     return true;
 }

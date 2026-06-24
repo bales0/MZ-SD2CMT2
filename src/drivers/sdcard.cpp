@@ -17,9 +17,18 @@
 #define SD_CHIP_SELECT_PIN 53
 #define SD_COMPAT_SS_PIN 10
 
-/* 1 MHz is adequate for directory browsing but too tight for 44.1/48 kHz WAV streaming. */
+/*
+    CMT/LCD hardware in this project does not share the Mega SPI bus. Dedicated
+    SPI lets SdFat observe SD busy state instead of blocking a realtime record
+    write behind internal card programming. 8 MHz is conservative for common
+    5 V SD modules and still has ample bandwidth for 44.1 kHz PCM.
+*/
 #ifndef SD2CMT2_SD_SPI_MHZ
-#define SD2CMT2_SD_SPI_MHZ 4
+#define SD2CMT2_SD_SPI_MHZ 8
+#endif
+
+#ifndef SD2CMT2_SD_SPI_MODE
+#define SD2CMT2_SD_SPI_MODE DEDICATED_SPI
 #endif
 
 static SdFat sd;
@@ -27,17 +36,20 @@ static FsFile sdcard_stream_file;
 
 static bool sdcard_mounted = false;
 static const char *sdcard_error = "NOT INIT";
-
 static uint8_t sdcard_error_code = 0;
 static uint8_t sdcard_error_data = 0;
 
-static void sdcard_set_card_error(void)
+static void sdcard_close_all_files(void)
 {
     if (sdcard_stream_file.isOpen())
     {
         sdcard_stream_file.close();
     }
+}
 
+static void sdcard_set_card_error(void)
+{
+    sdcard_close_all_files();
     sdcard_mounted = false;
     sdcard_error = "SD CARD ERROR";
 
@@ -54,22 +66,18 @@ static void sdcard_set_card_error(void)
 }
 
 /*
-    sdcard_mounted only means that sd.begin() succeeded at some earlier time.
-    A card can still be removed afterwards, so browser operations verify the
-    card with a lightweight CID command before accessing the filesystem.
-
-    Sequential format readers deliberately do not call this before every read:
-    repeated CMD10 commands would reduce stream throughput. They detect an
-    actual I/O failure in sdcard_file_read() instead.
+    Browser operations probe with CMD10. Stream and conversion reads avoid a
+    probe per block because that would add latency; an actual I/O error drops
+    the mounted state through sdcard_set_card_error().
 */
 static bool sdcard_probe_present(void)
 {
+    cid_t cid;
+
     if (!sdcard_mounted || (sd.card() == NULL))
     {
         return false;
     }
-
-    cid_t cid;
 
     if (!sd.card()->readCID(&cid))
     {
@@ -95,7 +103,6 @@ static void sdcard_send_idle_clocks(void)
     digitalWrite(SD_COMPAT_SS_PIN, HIGH);
 
     SPI.begin();
-
     SPI.beginTransaction(SPISettings(250000, MSBFIRST, SPI_MODE0));
 
     for (uint8_t i = 0; i < 10; i++)
@@ -110,38 +117,27 @@ bool sdcard_init(void)
 {
     sdcard_early_prepare_pins();
 
-    /*
-        A previous successful begin() is not proof that the physical card is
-        still inserted. Probe it first; only then reuse the mounted state.
-    */
     if (sdcard_mounted && sdcard_probe_present())
     {
         sdcard_error = "OK";
         sdcard_error_code = 0;
         sdcard_error_data = 0;
-
         return true;
     }
 
-    if (sdcard_stream_file.isOpen())
-    {
-        sdcard_stream_file.close();
-    }
-
+    sdcard_close_all_files();
     sdcard_mounted = false;
     sdcard_error = "SD CARD ERROR";
     sdcard_error_code = 0;
     sdcard_error_data = 0;
 
     delay(100);
-
     sdcard_send_idle_clocks();
-
     delay(20);
 
     if (!sd.begin(SdSpiConfig(
             SD_CHIP_SELECT_PIN,
-            SHARED_SPI,
+            SD2CMT2_SD_SPI_MODE,
             SD_SCK_MHZ(SD2CMT2_SD_SPI_MHZ))))
     {
         sdcard_set_card_error();
@@ -158,7 +154,6 @@ bool sdcard_init(void)
     sdcard_error = "OK";
     sdcard_error_code = 0;
     sdcard_error_data = 0;
-
     return true;
 }
 
@@ -169,6 +164,10 @@ bool sdcard_is_mounted(void)
 
 uint16_t sdcard_count_entries(const char *path, uint16_t max_entries)
 {
+    FsFile dir;
+    FsFile file;
+    uint16_t count = 0;
+
     if (path == NULL)
     {
         sdcard_error = "BAD PATH";
@@ -180,15 +179,12 @@ uint16_t sdcard_count_entries(const char *path, uint16_t max_entries)
         return 0;
     }
 
-    FsFile dir;
-
     if (!dir.open(path))
     {
         if (!sdcard_probe_present())
         {
             return 0;
         }
-
         sdcard_error = "DIR FAIL";
         return 0;
     }
@@ -200,13 +196,9 @@ uint16_t sdcard_count_entries(const char *path, uint16_t max_entries)
         return 0;
     }
 
-    FsFile file;
-    uint16_t count = 0;
-
     while (file.openNext(&dir, O_RDONLY))
     {
         count++;
-
         file.close();
 
         if (count >= max_entries)
@@ -217,23 +209,21 @@ uint16_t sdcard_count_entries(const char *path, uint16_t max_entries)
 
     dir.close();
 
-    /*
-        openNext() returning false can mean a normal end of directory, but it
-        can also be caused by a card removed during the operation. Probe once
-        more before reporting a valid directory count.
-    */
     if (!sdcard_probe_present())
     {
         return 0;
     }
 
     sdcard_error = "OK";
-
     return count;
 }
 
 bool sdcard_read_entry_by_index(const char *path, uint16_t index, sdcard_entry_t *entry)
 {
+    FsFile dir;
+    FsFile file;
+    uint16_t current_index = 0;
+
     if (path == NULL)
     {
         sdcard_error = "BAD PATH";
@@ -253,15 +243,12 @@ bool sdcard_read_entry_by_index(const char *path, uint16_t index, sdcard_entry_t
         return false;
     }
 
-    FsFile dir;
-
     if (!dir.open(path))
     {
         if (!sdcard_probe_present())
         {
             return false;
         }
-
         sdcard_error = "DIR FAIL";
         return false;
     }
@@ -273,19 +260,14 @@ bool sdcard_read_entry_by_index(const char *path, uint16_t index, sdcard_entry_t
         return false;
     }
 
-    FsFile file;
-    uint16_t current_index = 0;
-
     while (file.openNext(&dir, O_RDONLY))
     {
         if (current_index == index)
         {
             file.getName(entry->name, sizeof(entry->name));
             entry->name[sizeof(entry->name) - 1] = '\0';
-
             entry->is_dir = file.isDir();
             entry->size = file.fileSize();
-
             file.close();
             dir.close();
 
@@ -310,23 +292,14 @@ bool sdcard_read_entry_by_index(const char *path, uint16_t index, sdcard_entry_t
         return false;
     }
 
-    strncpy(entry->name, "NO ENTRY", sizeof(entry->name) - 1);
-    entry->name[sizeof(entry->name) - 1] = '\0';
+    strncpy(entry->name, "NO ENTRY", sizeof(entry->name) - 1U);
+    entry->name[sizeof(entry->name) - 1U] = '\0';
     entry->is_dir = false;
     entry->size = 0;
-
     sdcard_error = "NO ENTRY";
-
     return false;
 }
 
-/*
-    Sequential file stream API for format readers.
-
-    Exactly one sequential source file can be open at a time. That fits the
-    current PLAY architecture and prevents a parser from sharing one FsFile
-    object with the browser. Do not call this API from an ISR.
-*/
 bool sdcard_file_open_read(const char *path)
 {
     if (path == NULL)
@@ -351,7 +324,6 @@ bool sdcard_file_open_read(const char *path)
         {
             return false;
         }
-
         sdcard_error = "FILE OPEN FAIL";
         return false;
     }
@@ -360,9 +332,53 @@ bool sdcard_file_open_read(const char *path)
     return true;
 }
 
+bool sdcard_file_open_write(const char *path)
+{
+    if (path == NULL)
+    {
+        sdcard_error = "BAD PATH";
+        return false;
+    }
+
+    if (!sdcard_probe_present())
+    {
+        return false;
+    }
+
+    if (sdcard_stream_file.isOpen())
+    {
+        sdcard_stream_file.close();
+    }
+
+    if (!sdcard_stream_file.open(path, O_RDWR | O_CREAT | O_TRUNC))
+    {
+        if (!sdcard_probe_present())
+        {
+            return false;
+        }
+        sdcard_error = "FILE CREATE FAIL";
+        return false;
+    }
+
+    sdcard_error = "OK";
+    return true;
+}
+
+bool sdcard_file_exists(const char *path)
+{
+    if ((path == NULL) || !sdcard_mounted)
+    {
+        return false;
+    }
+
+    return sd.exists(path);
+}
+
 int16_t sdcard_file_read(void *buffer, uint16_t size)
 {
-    if ((buffer == NULL) || (size == 0))
+    int result;
+
+    if ((buffer == NULL) || (size == 0U))
     {
         sdcard_error = "BAD ARG";
         return -1;
@@ -374,7 +390,7 @@ int16_t sdcard_file_read(void *buffer, uint16_t size)
         return -1;
     }
 
-    int result = sdcard_stream_file.read(buffer, size);
+    result = sdcard_stream_file.read(buffer, size);
 
     if (result < 0)
     {
@@ -382,10 +398,6 @@ int16_t sdcard_file_read(void *buffer, uint16_t size)
         return -1;
     }
 
-    /*
-        A zero-byte read before logical EOF is an I/O failure, not normal EOF.
-        Probe only in this exceptional path so sequential reading remains fast.
-    */
     if ((result == 0) &&
         (sdcard_stream_file.curPosition() < sdcard_stream_file.fileSize()))
     {
@@ -393,12 +405,122 @@ int16_t sdcard_file_read(void *buffer, uint16_t size)
         {
             return -1;
         }
-
         sdcard_error = "FILE READ FAIL";
         return -1;
     }
 
     return (int16_t)result;
+}
+
+int16_t sdcard_file_write(const void *buffer, uint16_t size)
+{
+    int result;
+
+    if ((buffer == NULL) || (size == 0U))
+    {
+        sdcard_error = "BAD ARG";
+        return -1;
+    }
+
+    if (!sdcard_mounted || !sdcard_stream_file.isOpen())
+    {
+        sdcard_set_card_error();
+        return -1;
+    }
+
+    result = (int)sdcard_stream_file.write(buffer, size);
+
+    if (result != (int)size)
+    {
+        if (!sdcard_probe_present())
+        {
+            return -1;
+        }
+        sdcard_error = "FILE WRITE FAIL";
+        return -1;
+    }
+
+    return (int16_t)result;
+}
+
+bool sdcard_file_preallocate(uint32_t length)
+{
+    if ((length == 0UL) || !sdcard_mounted || !sdcard_stream_file.isOpen())
+    {
+        sdcard_set_card_error();
+        return false;
+    }
+
+    if (!sdcard_stream_file.preAllocate((uint64_t)length))
+    {
+        if (!sdcard_probe_present())
+        {
+            return false;
+        }
+        sdcard_error = "PREALLOC FAIL";
+        return false;
+    }
+
+    sdcard_error = "OK";
+    return true;
+}
+
+bool sdcard_file_truncate(uint32_t length)
+{
+    if (!sdcard_mounted || !sdcard_stream_file.isOpen())
+    {
+        sdcard_set_card_error();
+        return false;
+    }
+
+    if (!sdcard_stream_file.truncate((uint64_t)length))
+    {
+        if (!sdcard_probe_present())
+        {
+            return false;
+        }
+        sdcard_error = "FILE TRUNC FAIL";
+        return false;
+    }
+
+    sdcard_error = "OK";
+    return true;
+}
+
+/*
+    With DEDICATED_SPI, SdFat can test the card busy signal without forcing a
+    blocking write wait. A caller may transmit one 512-byte sector after this
+    returns false, then must wait for a later false before sending another.
+*/
+bool sdcard_file_is_busy(void)
+{
+    if (!sdcard_mounted || !sdcard_stream_file.isOpen())
+    {
+        return true;
+    }
+
+    return sdcard_stream_file.isBusy();
+}
+
+bool sdcard_file_sync(void)
+{
+    if (!sdcard_mounted || !sdcard_stream_file.isOpen())
+    {
+        sdcard_set_card_error();
+        return false;
+    }
+
+    if (!sdcard_stream_file.sync())
+    {
+        if (!sdcard_probe_present())
+        {
+            return false;
+        }
+        sdcard_error = "FILE SYNC FAIL";
+        return false;
+    }
+
+    return true;
 }
 
 bool sdcard_file_seek(uint32_t position)
@@ -415,7 +537,6 @@ bool sdcard_file_seek(uint32_t position)
         {
             return false;
         }
-
         sdcard_error = "FILE SEEK FAIL";
         return false;
     }
@@ -425,22 +546,14 @@ bool sdcard_file_seek(uint32_t position)
 
 uint32_t sdcard_file_size(void)
 {
-    if (!sdcard_stream_file.isOpen())
-    {
-        return 0;
-    }
-
-    return (uint32_t)sdcard_stream_file.fileSize();
+    return sdcard_stream_file.isOpen() ?
+        (uint32_t)sdcard_stream_file.fileSize() : 0UL;
 }
 
 uint32_t sdcard_file_position(void)
 {
-    if (!sdcard_stream_file.isOpen())
-    {
-        return 0;
-    }
-
-    return (uint32_t)sdcard_stream_file.curPosition();
+    return sdcard_stream_file.isOpen() ?
+        (uint32_t)sdcard_stream_file.curPosition() : 0UL;
 }
 
 bool sdcard_file_is_open(void)
@@ -454,6 +567,28 @@ void sdcard_file_close(void)
     {
         sdcard_stream_file.close();
     }
+}
+
+bool sdcard_file_remove(const char *path)
+{
+    if ((path == NULL) || !sdcard_mounted)
+    {
+        sdcard_error = "BAD PATH";
+        return false;
+    }
+
+    if (!sd.remove(path))
+    {
+        if (!sdcard_probe_present())
+        {
+            return false;
+        }
+        sdcard_error = "FILE REMOVE ERR";
+        return false;
+    }
+
+    sdcard_error = "OK";
+    return true;
 }
 
 uint16_t sdcard_count_root_entries(uint16_t max_entries)

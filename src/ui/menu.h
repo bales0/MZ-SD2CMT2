@@ -18,5 +18,9 @@ typedef enum
 void menu_init(void);
 menu_action_t menu_handle_event(button_event_t event);
 void menu_render(void);
+
 menu_play_mode_t menu_get_play_mode(void);
 bool menu_get_invert_signal(void);
+
+/* Runtime only; deliberately not stored in EEPROM. */
+uint32_t menu_get_record_sample_rate(void);

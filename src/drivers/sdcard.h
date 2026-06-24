@@ -27,23 +27,40 @@ uint16_t sdcard_count_root_entries(uint16_t max_entries);
 bool sdcard_read_root_entry_by_index(uint16_t index, sdcard_entry_t *entry);
 
 /*
-    Sequential read stream for format readers.
-
-    One source file can be open at a time. These functions must be called only
-    from normal application code, never from a timer or edge ISR.
+    Sequential one-file stream for format readers and in-place recording conversion.
+    All functions are foreground only; never use them from a timer ISR.
 */
 bool sdcard_file_open_read(const char *path);
+bool sdcard_file_open_write(const char *path);
+bool sdcard_file_exists(const char *path);
+
 int16_t sdcard_file_read(void *buffer, uint16_t size);
+int16_t sdcard_file_write(const void *buffer, uint16_t size);
+
+/*
+    Reserve contiguous clusters before recording starts. The reservation is
+    optional; callers may continue if it fails due to a nearly full card.
+*/
+bool sdcard_file_preallocate(uint32_t length);
+bool sdcard_file_truncate(uint32_t length);
+
+/* True while SD programming is busy; realtime RECORD must defer its next
+   sector until this becomes false. */
+bool sdcard_file_is_busy(void);
+
+bool sdcard_file_sync(void);
+
 bool sdcard_file_seek(uint32_t position);
 uint32_t sdcard_file_size(void);
 uint32_t sdcard_file_position(void);
 bool sdcard_file_is_open(void);
 void sdcard_file_close(void);
 
+/* Remove a closed file. Used only after successful raw->WAV conversion. */
+bool sdcard_file_remove(const char *path);
+
 const char *sdcard_last_error(void);
-
 uint8_t sdcard_last_error_code(void);
-
 uint8_t sdcard_last_error_data(void);
 
 #endif

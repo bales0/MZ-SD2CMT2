@@ -117,4 +117,11 @@ bool wav_sample_stream_finished(void);
 const wav_reader_info_t *wav_sample_stream_info(void);
 wav_reader_status_t wav_sample_stream_last_status(void);
 
+/*
+    512-byte foreground work block shared with RECORD.
+    RECORD may use it only after wav_sample_stream_close(): PLAY and RECORD
+    are mutually exclusive modes.
+*/
+uint8_t *wav_sample_stream_get_shared_work_buffer(void);
+
 #endif

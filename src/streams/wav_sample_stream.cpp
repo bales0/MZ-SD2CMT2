@@ -352,3 +352,8 @@ wav_reader_status_t wav_sample_stream_last_status(void)
 {
     return stream_status;
 }
+
+uint8_t *wav_sample_stream_get_shared_work_buffer(void)
+{
+    return wav_raw_buffer;
+}

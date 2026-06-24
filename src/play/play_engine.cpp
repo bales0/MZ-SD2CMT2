@@ -90,6 +90,14 @@ static bool play_engine_prepare_wav(void)
     wav_sample_stream_config_t stream_config;
     const wav_reader_info_t *info;
 
+    /*
+        RECORD owns Timer1/D15, while WAV PLAY owns Timer3/OC3B on D2.
+        Reinitializing the playback driver at every new WAV session explicitly
+        restores Timer3, the OC3B compare mode and PE4 direction after a
+        completed or failed record session.
+    */
+    wav_playback_driver_init();
+
     stream_config.low_threshold = 100;
     stream_config.high_threshold = 155;
     stream_config.invert_signal = prepared_invert_signal;

@@ -7,6 +7,7 @@ typedef enum
 {
     BROWSER_ACTION_NONE = 0,
     BROWSER_ACTION_FILE_SELECTED,
+    BROWSER_ACTION_RECORD_REQUESTED,
     BROWSER_ACTION_MENU_REQUESTED
 } browser_action_t;
 
@@ -18,3 +19,9 @@ const char* browser_get_selected_full_path(void);
 bool browser_selected_is_directory(void);
 void browser_save_position(void);
 void browser_restore_saved_position(void);
+
+/* Current browser directory is used as the target for RECxxxx.WAV files. */
+const char* browser_get_current_path(void);
+
+/* Rebuild current directory after a completed recording. */
+void browser_refresh(void);

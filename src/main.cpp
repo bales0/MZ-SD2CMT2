@@ -11,6 +11,8 @@
 #include "ui/browser.h"
 #include "ui/menu.h"
 #include "ui/play_screen.h"
+#include "ui/record_screen.h"
+#include "record/wav_record_engine.h"
 
 #define CALIBRATION_PRESSED_THRESHOLD 900
 #define CALIBRATION_RELEASED_THRESHOLD 900
@@ -24,16 +26,22 @@
 */
 #define WAV_PLAY_KEYPAD_POLL_MS 5U
 #define WAV_PLAY_LCD_UPDATE_MS 250U
+#define WAV_RECORD_KEYPAD_POLL_MS 5U
+#define WAV_RECORD_LCD_UPDATE_MS 250U
+#define WAV_RECORD_FINISHED_HOLD_MS 1200U
 
 typedef enum
 {
     APP_SCREEN_BROWSER = 0,
     APP_SCREEN_PLAY_STUB,
+    APP_SCREEN_RECORD,
     APP_SCREEN_MENU
 } app_screen_t;
 
 static uint32_t last_lcd_update_ms = 0;
 static uint32_t last_play_keypad_poll_ms = 0;
+static uint32_t last_record_keypad_poll_ms = 0;
+static uint32_t record_finished_since_ms = 0;
 static bool sd_ok = false;
 static app_screen_t current_screen = APP_SCREEN_BROWSER;
 
@@ -188,6 +196,24 @@ static void app_enter_play_stub(const char *filename, const char *full_path)
     lcd_clear();
 }
 
+static void app_enter_record(void)
+{
+    browser_save_position();
+
+    /*
+        RIGHT short starts immediately. The engine creates the next free
+        REC0001.WAV ... REC9999.WAV in the current browser directory.
+    */
+    wav_record_engine_start(
+        browser_get_current_path(),
+        menu_get_record_sample_rate()
+    );
+
+    record_finished_since_ms = 0U;
+    current_screen = APP_SCREEN_RECORD;
+    lcd_clear();
+}
+
 static void app_enter_menu(void)
 {
     browser_save_position();
@@ -203,6 +229,10 @@ static void app_handle_browser_event(button_event_t event)
     {
         case BROWSER_ACTION_FILE_SELECTED:
             app_enter_play_stub(browser_get_selected_name(), browser_get_selected_full_path());
+            break;
+
+        case BROWSER_ACTION_RECORD_REQUESTED:
+            app_enter_record();
             break;
 
         case BROWSER_ACTION_MENU_REQUESTED:
@@ -233,6 +263,31 @@ static void app_handle_play_stub_event(button_event_t event)
         case PLAY_SCREEN_ACTION_NONE:
         default:
             break;
+    }
+}
+
+static void app_handle_record_event(button_event_t event)
+{
+    record_screen_action_t action = record_screen_handle_event(event);
+    wav_record_engine_state_t state = wav_record_engine_get_state();
+
+    if (action != RECORD_SCREEN_ACTION_STOP_OR_BACK)
+    {
+        return;
+    }
+
+    if (state == WAV_RECORD_ENGINE_RECORDING)
+    {
+        wav_record_engine_request_stop();
+        return;
+    }
+
+    if ((state == WAV_RECORD_ENGINE_FINISHED) ||
+        (state == WAV_RECORD_ENGINE_ERROR) ||
+        (state == WAV_RECORD_ENGINE_STOPPED))
+    {
+        browser_refresh();
+        app_enter_browser();
     }
 }
 
@@ -284,6 +339,7 @@ void setup()
     browser_init(sd_ok);
     menu_init();
     play_controller_init();
+    wav_record_engine_init();
     current_screen = APP_SCREEN_BROWSER;
 
     lcd_clear();
@@ -328,6 +384,60 @@ void loop()
         }
 
         play_controller_service();
+        return;
+    }
+
+    /*
+        RECORD uses a separate Timer1 sampler and a raw 1-bit FIFO. SD writes
+        happen only in foreground; run service before and after optional UI
+        work to keep the recording ring drained.
+    */
+    if (current_screen == APP_SCREEN_RECORD)
+    {
+        wav_record_engine_state_t record_state;
+
+        wav_record_engine_service();
+        now = millis();
+        record_state = wav_record_engine_get_state();
+
+        if ((record_state == WAV_RECORD_ENGINE_FINISHED) &&
+            (record_finished_since_ms == 0U))
+        {
+            record_finished_since_ms = now;
+        }
+
+        if ((record_finished_since_ms != 0U) &&
+            ((now - record_finished_since_ms) >=
+             WAV_RECORD_FINISHED_HOLD_MS))
+        {
+            browser_refresh();
+            app_enter_browser();
+            return;
+        }
+
+        if ((now - last_record_keypad_poll_ms) >=
+            WAV_RECORD_KEYPAD_POLL_MS)
+        {
+            button_event_t record_event;
+
+            last_record_keypad_poll_ms = now;
+            record_event = keypad_get_event();
+
+            if (record_event != BUTTON_EVENT_NONE)
+            {
+                app_handle_record_event(record_event);
+            }
+        }
+
+        wav_record_engine_service();
+
+        if ((now - last_lcd_update_ms) >= WAV_RECORD_LCD_UPDATE_MS)
+        {
+            last_lcd_update_ms = now;
+            record_screen_render();
+        }
+
+        wav_record_engine_service();
         return;
     }
 
@@ -379,6 +489,10 @@ void loop()
                 play_screen_render(&view);
                 break;
             }
+
+            case APP_SCREEN_RECORD:
+                record_screen_render();
+                break;
 
             case APP_SCREEN_MENU:
                 menu_render();

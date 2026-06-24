@@ -337,6 +337,32 @@ static browser_action_t browser_select_current(void)
     return BROWSER_ACTION_FILE_SELECTED;
 }
 
+static browser_action_t browser_request_record(void)
+{
+    /*
+        RIGHT has exactly two states:
+        - SD CARD ERROR: retry/reinitialize only. A successful retry never
+          starts recording on the same press.
+        - SD OK: verify the mounted card once and start RECORD.
+    */
+    if (!sd_ok)
+    {
+        browser_refresh_sd();
+        return BROWSER_ACTION_NONE;
+    }
+
+    /* A card may have been removed after the browser was built. */
+    if (!sdcard_init())
+    {
+        sd_ok = false;
+        browser_build_dir_index();
+        return BROWSER_ACTION_NONE;
+    }
+
+    sd_ok = true;
+    return BROWSER_ACTION_RECORD_REQUESTED;
+}
+
 static void browser_make_path_label(char *out, size_t out_size)
 {
     if (out == NULL || out_size == 0)
@@ -396,8 +422,8 @@ browser_action_t browser_handle_event(button_event_t event)
             browser_go_root();
             return BROWSER_ACTION_NONE;
         case BUTTON_EVENT_RIGHT_SHORT:
-            browser_refresh_sd();
-            return BROWSER_ACTION_NONE;
+        case BUTTON_EVENT_RIGHT_LONG:
+            return browser_request_record();
         case BUTTON_EVENT_SELECT_SHORT:
             return browser_select_current();
         case BUTTON_EVENT_SELECT_LONG:
@@ -494,4 +520,15 @@ void browser_restore_saved_position(void)
     {
         browser_load_current_entry();
     }
+}
+
+
+const char* browser_get_current_path(void)
+{
+    return current_path;
+}
+
+void browser_refresh(void)
+{
+    browser_refresh_sd();
 }

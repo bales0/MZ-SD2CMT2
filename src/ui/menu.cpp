@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <stdio.h>
+
 #include "menu.h"
 #include "../drivers/lcd.h"
 
@@ -7,16 +8,19 @@ typedef enum
 {
     MENU_ITEM_PLAY_MODE = 0,
     MENU_ITEM_INVERT_SIGNAL,
+    MENU_ITEM_RECORD_RATE,
     MENU_ITEM_COUNT
 } menu_item_t;
 
 static menu_item_t selected_item = MENU_ITEM_PLAY_MODE;
 static menu_play_mode_t play_mode = MENU_PLAY_MODE_NORMAL;
 static bool invert_signal = false;
+static uint32_t record_sample_rate = 22050UL;
 
 static void lcd_print_fixed(uint8_t row, const char *text)
 {
     char line[17];
+
     snprintf(line, sizeof(line), "%-16s", text != NULL ? text : "");
     lcd_set_cursor(0, row);
     lcd_print(line);
@@ -24,12 +28,20 @@ static void lcd_print_fixed(uint8_t row, const char *text)
 
 static void menu_move_up(void)
 {
-    selected_item = (selected_item == MENU_ITEM_PLAY_MODE) ? MENU_ITEM_INVERT_SIGNAL : (menu_item_t)((int)selected_item - 1);
+    if (selected_item == MENU_ITEM_PLAY_MODE)
+    {
+        selected_item = (menu_item_t)(MENU_ITEM_COUNT - 1);
+    }
+    else
+    {
+        selected_item = (menu_item_t)((int)selected_item - 1);
+    }
 }
 
 static void menu_move_down(void)
 {
-    selected_item = (menu_item_t)(((int)selected_item + 1) % (int)MENU_ITEM_COUNT);
+    selected_item = (menu_item_t)(((int)selected_item + 1) %
+                                  (int)MENU_ITEM_COUNT);
 }
 
 static void menu_toggle_current(void)
@@ -37,11 +49,19 @@ static void menu_toggle_current(void)
     switch (selected_item)
     {
         case MENU_ITEM_PLAY_MODE:
-            play_mode = (play_mode == MENU_PLAY_MODE_NORMAL) ? MENU_PLAY_MODE_ULTRA_TURBO : MENU_PLAY_MODE_NORMAL;
+            play_mode = (play_mode == MENU_PLAY_MODE_NORMAL) ?
+                MENU_PLAY_MODE_ULTRA_TURBO : MENU_PLAY_MODE_NORMAL;
             break;
+
         case MENU_ITEM_INVERT_SIGNAL:
             invert_signal = !invert_signal;
             break;
+
+        case MENU_ITEM_RECORD_RATE:
+            record_sample_rate = (record_sample_rate == 22050UL) ?
+                44100UL : 22050UL;
+            break;
+
         default:
             break;
     }
@@ -52,6 +72,7 @@ void menu_init(void)
     selected_item = MENU_ITEM_PLAY_MODE;
     play_mode = MENU_PLAY_MODE_NORMAL;
     invert_signal = false;
+    record_sample_rate = 22050UL;
 }
 
 menu_action_t menu_handle_event(button_event_t event)
@@ -62,19 +83,24 @@ menu_action_t menu_handle_event(button_event_t event)
         case BUTTON_EVENT_UP_REPEAT:
             menu_move_up();
             return MENU_ACTION_NONE;
+
         case BUTTON_EVENT_DOWN_PRESS:
         case BUTTON_EVENT_DOWN_REPEAT:
             menu_move_down();
             return MENU_ACTION_NONE;
+
         case BUTTON_EVENT_SELECT_SHORT:
             menu_toggle_current();
             return MENU_ACTION_NONE;
+
         case BUTTON_EVENT_LEFT_SHORT:
         case BUTTON_EVENT_LEFT_LONG:
             return MENU_ACTION_BACK;
+
         default:
             break;
     }
+
     return MENU_ACTION_NONE;
 }
 
@@ -84,12 +110,26 @@ void menu_render(void)
     {
         case MENU_ITEM_PLAY_MODE:
             lcd_print_fixed(0, ">PLAY MODE");
-            lcd_print_fixed(1, play_mode == MENU_PLAY_MODE_NORMAL ? " NORMAL" : " ULTRA TURBO");
+            lcd_print_fixed(1, play_mode == MENU_PLAY_MODE_NORMAL ?
+                            " NORMAL" : " ULTRA TURBO");
             break;
+
         case MENU_ITEM_INVERT_SIGNAL:
             lcd_print_fixed(0, ">INVERT SIG.");
             lcd_print_fixed(1, invert_signal ? " ON" : " OFF");
             break;
+
+        case MENU_ITEM_RECORD_RATE:
+        {
+            char line[17];
+
+            lcd_print_fixed(0, ">REC SAMPLE RATE");
+            snprintf(line, sizeof(line), " %5lu Hz",
+                     (unsigned long)record_sample_rate);
+            lcd_print_fixed(1, line);
+            break;
+        }
+
         default:
             lcd_print_fixed(0, ">MENU");
             lcd_print_fixed(1, " ERROR");
@@ -105,4 +145,9 @@ menu_play_mode_t menu_get_play_mode(void)
 bool menu_get_invert_signal(void)
 {
     return invert_signal;
+}
+
+uint32_t menu_get_record_sample_rate(void)
+{
+    return record_sample_rate;
 }
