@@ -102,7 +102,18 @@ static void browser_load_current_entry(void)
     }
     if (!sdcard_read_entry_by_index(current_path, selected_index, &current_entry))
     {
-        strncpy(current_entry.name, sdcard_last_error(), sizeof(current_entry.name) - 1);
+        sd_ok = sdcard_is_mounted();
+
+        if (!sd_ok)
+        {
+            dir_count = 0;
+            strncpy(current_entry.name, "SD CARD ERROR", sizeof(current_entry.name) - 1);
+        }
+        else
+        {
+            strncpy(current_entry.name, sdcard_last_error(), sizeof(current_entry.name) - 1);
+        }
+
         current_entry.name[sizeof(current_entry.name) - 1] = '\0';
         current_entry.is_dir = false;
         current_entry.size = 0;
@@ -115,6 +126,13 @@ static void browser_build_dir_index(void)
     if (sd_ok)
     {
         dir_count = sdcard_count_entries(current_path, MAX_DIR_ENTRIES);
+        sd_ok = sdcard_is_mounted();
+
+        if (!sd_ok)
+        {
+            dir_count = 0;
+        }
+
         selected_index = 0;
     }
     else
@@ -250,6 +268,7 @@ static bool browser_enter_directory(const char *name)
     {
         return false;
     }
+
     char new_path[BROWSER_PATH_MAX];
     if (browser_is_root())
     {
@@ -406,17 +425,16 @@ void browser_render(void)
         }
         else
         {
-            snprintf(line1, sizeof(line1), "E:%02X D:%02X      ", sdcard_last_error_code(), sdcard_last_error_data());
             lcd_set_cursor(0, 1);
-            lcd_print(line1);
+            lcd_print("RIGHT=RETRY     ");
         }
         return;
     }
 
     if (!sd_ok)
     {
-        snprintf(line0, sizeof(line0), "SD E:%02X D:%02X", sdcard_last_error_code(), sdcard_last_error_data());
-        snprintf(line1, sizeof(line1), "%-16s", current_entry.name);
+        snprintf(line0, sizeof(line0), "%-16s", "SD CARD ERROR");
+        snprintf(line1, sizeof(line1), "%-16s", "RIGHT=RETRY");
     }
     else if (dir_count == 0)
     {

@@ -26,6 +26,20 @@ uint16_t sdcard_count_root_entries(uint16_t max_entries);
 
 bool sdcard_read_root_entry_by_index(uint16_t index, sdcard_entry_t *entry);
 
+/*
+    Sequential read stream for format readers.
+
+    One source file can be open at a time. These functions must be called only
+    from normal application code, never from a timer or edge ISR.
+*/
+bool sdcard_file_open_read(const char *path);
+int16_t sdcard_file_read(void *buffer, uint16_t size);
+bool sdcard_file_seek(uint32_t position);
+uint32_t sdcard_file_size(void);
+uint32_t sdcard_file_position(void);
+bool sdcard_file_is_open(void);
+void sdcard_file_close(void);
+
 const char *sdcard_last_error(void);
 
 uint8_t sdcard_last_error_code(void);
