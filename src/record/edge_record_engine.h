@@ -16,7 +16,7 @@ typedef enum
 } edge_record_engine_state_t;
 
 void edge_record_engine_init(void);
-/* Finds the next RECxxxx.LEP/L16 name without creating a file. */
+/* Finds the next shared RECxxxx.LEP/L16 name without creating a file. */
 bool edge_record_engine_preview_filename(const char *directory_path, file_format_t format);
 bool edge_record_engine_start(const char *directory_path, file_format_t format);
 bool edge_record_engine_pause(void);

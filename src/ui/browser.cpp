@@ -4,6 +4,7 @@
 #include "browser.h"
 #include "../drivers/lcd.h"
 #include "../drivers/sdcard.h"
+#include "../streams/cmt_mode_scratch.h"
 
 #define MAX_DIR_ENTRIES 999
 #define BROWSER_PATH_MAX 96
@@ -24,7 +25,6 @@ static char saved_name[BROWSER_NAME_MAX];
 static bool saved_is_dir = false;
 static uint16_t saved_index = 0;
 static uint8_t parent_stack_depth = 0;
-static char parent_stack_name[BROWSER_PARENT_STACK_MAX][BROWSER_NAME_MAX];
 static bool parent_stack_is_dir[BROWSER_PARENT_STACK_MAX];
 static uint16_t parent_stack_index[BROWSER_PARENT_STACK_MAX];
 static char status_message[17];
@@ -200,8 +200,8 @@ static void browser_push_parent_position(void)
     {
         return;
     }
-    strncpy(parent_stack_name[parent_stack_depth], current_entry.name, sizeof(parent_stack_name[parent_stack_depth]) - 1);
-    parent_stack_name[parent_stack_depth][sizeof(parent_stack_name[parent_stack_depth]) - 1] = '\0';
+    strncpy(cmt_mode_scratch.browser_parent_names[parent_stack_depth], current_entry.name, sizeof(cmt_mode_scratch.browser_parent_names[parent_stack_depth]) - 1);
+    cmt_mode_scratch.browser_parent_names[parent_stack_depth][sizeof(cmt_mode_scratch.browser_parent_names[parent_stack_depth]) - 1] = '\0';
     parent_stack_is_dir[parent_stack_depth] = current_entry.is_dir;
     parent_stack_index[parent_stack_depth] = selected_index;
     parent_stack_depth++;
@@ -214,7 +214,7 @@ static bool browser_pop_parent_position_and_restore(void)
         return false;
     }
     parent_stack_depth--;
-    return browser_restore_entry_by_identity(parent_stack_name[parent_stack_depth], parent_stack_is_dir[parent_stack_depth], parent_stack_index[parent_stack_depth]);
+    return browser_restore_entry_by_identity(cmt_mode_scratch.browser_parent_names[parent_stack_depth], parent_stack_is_dir[parent_stack_depth], parent_stack_index[parent_stack_depth]);
 }
 
 static void browser_refresh_sd(void)
@@ -546,6 +546,19 @@ void browser_restore_saved_position(void)
     {
         browser_load_current_entry();
     }
+}
+
+
+void browser_begin_record_scratch(void)
+{
+    /* The record engine reuses the 512B parent-name area as a second stage. */
+    parent_stack_depth = 0U;
+}
+
+void browser_end_record_scratch(void)
+{
+    /* History bytes were reused by record mode; navigation itself remains valid. */
+    parent_stack_depth = 0U;
 }
 
 

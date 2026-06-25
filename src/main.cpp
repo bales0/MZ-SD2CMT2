@@ -35,6 +35,9 @@ static uint32_t last_active_keypad_poll_ms = 0U;
 static bool sd_ok = false;
 static app_screen_t current_screen = APP_SCREEN_BROWSER;
 
+/* Fixed root-level destination for WAV, LEP and L16 recordings. */
+static const char RECORDINGS_DIRECTORY[] = "/RECORDINGS";
+
 static void lcd_print_line(uint8_t row, const char *text)
 {
     char line[17];
@@ -115,6 +118,7 @@ static bool run_keypad_calibration(keypad_calibration_t *calibration)
 
 static void app_enter_browser(void)
 {
+    browser_end_record_scratch();
     browser_restore_saved_position();
     current_screen = APP_SCREEN_BROWSER;
     lcd_clear();
@@ -135,10 +139,11 @@ static void app_enter_record(void)
 {
     record_engine_config_t config;
     browser_save_position();
+    browser_begin_record_scratch();
     config.format = record_menu_get_format();
     config.wav_sample_rate = record_menu_get_wav_sample_rate();
     config.control_mode = record_menu_get_control_mode();
-    (void)record_engine_start(browser_get_current_path(), &config);
+    (void)record_engine_start(RECORDINGS_DIRECTORY, &config);
     current_screen = APP_SCREEN_RECORD;
     lcd_clear();
 }

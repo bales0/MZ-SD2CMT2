@@ -18,7 +18,8 @@ typedef enum
 void wav_record_engine_init(void);
 
 /*
-    Starts REC0001.WAV ... REC9999.WAV in directory_path.
+    Starts the next shared RECxxxx.WAV in directory_path. The sequence is shared
+    with RECxxxx.LEP and RECxxxx.L16.
 
     During RECORD the file is already a normal PCM WAV stream. Timer1 packs
     D15 samples only inside the realtime FIFO; foreground code immediately

@@ -21,151 +21,305 @@ static volatile uint16_t edge_read_sequence = 0U;
 static volatile uint16_t edge_write_sequence = 0U;
 static volatile uint8_t edge_state = EDGE_RECORD_DRIVER_STOPPED;
 
-/* Timer5 runs at F_CPU/8 = 2 MHz => 0.5us resolution. */
-static volatile uint16_t timer5_high_word = 0U;
+/*
+   Timer5 is deliberately configured per output format:
+   - L16: F_CPU/64 = 250 kHz, 4 us/tick, exactly four ticks per L16 unit.
+   - LEP: F_CPU/8  = 2 MHz, 0.5 us/tick, exactly 100 ticks per LEP unit.
+
+   The overflow count is only eight bits. This still covers more than 5 s:
+   - L16: 255 * 262.144 ms = 66.8 s
+   - LEP: 255 *  32.768 ms = 8.36 s
+*/
+static volatile uint8_t timer5_overflow_count = 0U;
+static volatile uint16_t paused_counter = 0U;
+static volatile uint8_t paused_overflows = 0U;
 static uint16_t unit_ticks = 100U;
-static volatile uint32_t last_edge_tick = 0UL;
-static volatile uint32_t pause_tick = 0UL;
+static uint8_t timer5_clock_bits = _BV(CS51);
 static volatile uint8_t active_level = 0U;
-/* Signed residual keeps the sum of encoded units phase-locked to Timer5. */
-static int16_t quantization_residual_ticks = 0;
+static volatile uint8_t initial_level = 0U;
 
-static inline uint32_t edge_timer5_now_from_isr(void)
-{
-    uint16_t high = timer5_high_word;
-    uint16_t low = TCNT5;
-    if (((TIFR5 & _BV(TOV5)) != 0U) && (low < 0x8000U))
-    {
-        high++;
-    }
-    return ((uint32_t)high << 16) | low;
-}
+/* Error-diffusion residual, bounded to +/- half of one output unit. */
+static int8_t quantization_residual_ticks = 0;
 
-static uint32_t edge_timer5_now(void)
+/* One unpaired 1..15-unit slot is held until the next short slot arrives. */
+static volatile uint8_t pending_short_units = 0U;
+
+static inline bool edge_fifo_reserve_from_isr(uint8_t count)
 {
-    uint32_t result;
-    ATOMIC_BLOCK(ATOMIC_RESTORESTATE)
-    {
-        result = edge_timer5_now_from_isr();
-    }
-    return result;
+    uint16_t used = (uint16_t)(edge_write_sequence - edge_read_sequence);
+    return ((uint16_t)(EDGE_FIFO_CAPACITY - used) >= count);
 }
 
 static inline bool edge_push_byte_from_isr(uint8_t value)
 {
     uint16_t w = edge_write_sequence;
-    if ((uint16_t)(w - edge_read_sequence) >= EDGE_FIFO_CAPACITY)
+
+    if (!edge_fifo_reserve_from_isr(1U))
     {
         return false;
     }
+
     wav_sample_stream_isr_bytes[w & EDGE_FIFO_MASK] = value;
     asm volatile("" ::: "memory");
     edge_write_sequence = (uint16_t)(w + 1U);
     return true;
 }
 
-static inline bool edge_push_u32_interval_from_isr(uint8_t level, uint32_t units)
+static inline bool edge_flush_pending_short_from_isr(void)
 {
-    uint16_t write_local = edge_write_sequence;
-    uint16_t used = (uint16_t)(write_local - edge_read_sequence);
+    uint8_t pending = pending_short_units;
 
-    if ((uint16_t)(EDGE_FIFO_CAPACITY - used) < EDGE_RECORD_EXTENDED_TOKEN_BYTES)
+    if (pending == 0U)
+    {
+        return true;
+    }
+    if (!edge_push_byte_from_isr((uint8_t)(pending << 4)))
+    {
+        return false;
+    }
+    pending_short_units = 0U;
+    return true;
+}
+
+static inline bool edge_push_short_units_from_isr(uint8_t units)
+{
+    uint8_t pending = pending_short_units;
+
+    if ((units == 0U) || (units > 15U))
+    {
+        return false;
+    }
+    if (pending == 0U)
+    {
+        pending_short_units = units;
+        return true;
+    }
+    if (!edge_push_byte_from_isr((uint8_t)((pending << 4) | units)))
+    {
+        return false;
+    }
+    pending_short_units = 0U;
+    return true;
+}
+
+static inline bool edge_push_unit_from_isr(uint8_t units)
+{
+    uint16_t w;
+
+    if ((units < 16U) || (units > 127U))
+    {
+        return false;
+    }
+    if (!edge_flush_pending_short_from_isr() || !edge_fifo_reserve_from_isr(2U))
     {
         return false;
     }
 
-    /* Publish all six bytes as one record so foreground never sees a split token. */
-    wav_sample_stream_isr_bytes[write_local & EDGE_FIFO_MASK] = EDGE_RECORD_EXTENDED_TOKEN;
-    write_local++;
-    wav_sample_stream_isr_bytes[write_local & EDGE_FIFO_MASK] = level ? 1U : 0U;
-    write_local++;
-    wav_sample_stream_isr_bytes[write_local & EDGE_FIFO_MASK] = (uint8_t)(units & 0xFFUL);
-    write_local++;
-    wav_sample_stream_isr_bytes[write_local & EDGE_FIFO_MASK] = (uint8_t)((units >> 8) & 0xFFUL);
-    write_local++;
-    wav_sample_stream_isr_bytes[write_local & EDGE_FIFO_MASK] = (uint8_t)((units >> 16) & 0xFFUL);
-    write_local++;
-    wav_sample_stream_isr_bytes[write_local & EDGE_FIFO_MASK] = (uint8_t)((units >> 24) & 0xFFUL);
-    write_local++;
-
+    w = edge_write_sequence;
+    wav_sample_stream_isr_bytes[w & EDGE_FIFO_MASK] = EDGE_RECORD_TOKEN_UNIT;
+    w++;
+    wav_sample_stream_isr_bytes[w & EDGE_FIFO_MASK] = units;
+    w++;
     asm volatile("" ::: "memory");
-    edge_write_sequence = write_local;
+    edge_write_sequence = w;
+    return true;
+}
+
+static inline bool edge_push_long_units_from_isr(uint32_t units)
+{
+    uint16_t w;
+
+    if (units <= 127UL)
+    {
+        return false;
+    }
+    if (!edge_flush_pending_short_from_isr() ||
+        !edge_fifo_reserve_from_isr(EDGE_RECORD_TOKEN_LONG_BYTES))
+    {
+        return false;
+    }
+
+    w = edge_write_sequence;
+    wav_sample_stream_isr_bytes[w & EDGE_FIFO_MASK] = EDGE_RECORD_TOKEN_LONG;
+    w++;
+    wav_sample_stream_isr_bytes[w & EDGE_FIFO_MASK] = (uint8_t)(units & 0xFFUL);
+    w++;
+    wav_sample_stream_isr_bytes[w & EDGE_FIFO_MASK] =
+        (uint8_t)((units >> 8) & 0xFFUL);
+    w++;
+    wav_sample_stream_isr_bytes[w & EDGE_FIFO_MASK] =
+        (uint8_t)((units >> 16) & 0xFFUL);
+    w++;
+    wav_sample_stream_isr_bytes[w & EDGE_FIFO_MASK] =
+        (uint8_t)((units >> 24) & 0xFFUL);
+    w++;
+    asm volatile("" ::: "memory");
+    edge_write_sequence = w;
     return true;
 }
 
 /*
-    Convert an exact Timer5 interval to an integer LEP/L16 duration while
-    retaining the quantization remainder for the next edge.  Independent
-    rounding causes a fixed frequency error for durations such as 500 us:
-    500/16 = 31.25.  Error diffusion keeps the accumulated encoded time
-    within half a unit of the captured time, so the long-term frequency is
-    preserved.  The individual 16 us grid steps remain inherent to L16.
+   Fast path used by normal cassette/5 kHz edges. It has no 32-bit arithmetic.
+   L16 is shift/mask only. LEP uses repeated subtraction; at 5 kHz it executes
+   exactly two iterations for a 100 us half-wave.
 */
-static inline bool edge_emit_interval_from_isr(uint8_t level,
-                                                uint32_t ticks)
+static inline bool edge_quantize_no_overflow_from_isr(uint16_t ticks,
+                                                       uint8_t *units_out)
 {
-    uint32_t corrected_ticks = ticks;
-    uint32_t units;
+    int16_t adjusted;
+    uint16_t units = 0U;
 
-    if (quantization_residual_ticks >= 0)
+    if (units_out == NULL)
     {
-        uint16_t residual = (uint16_t)quantization_residual_ticks;
-        if (corrected_ticks <= (0xFFFFFFFFUL - residual))
-        {
-            corrected_ticks += residual;
-        }
+        return false;
+    }
+
+    /* Do not enter the 16-bit fast path for a value that may overflow int16. */
+    if ((unit_ticks == 100U && ticks > 12850U) ||
+        (unit_ticks == 4U && ticks > 520U))
+    {
+        return false;
+    }
+
+    adjusted = (int16_t)ticks + (int16_t)quantization_residual_ticks;
+    if (adjusted < 1)
+    {
+        adjusted = 1;
+    }
+
+    if (unit_ticks == 4U)
+    {
+        units = (uint16_t)((adjusted + 2) >> 2);
     }
     else
     {
-        uint16_t residual = (uint16_t)(-quantization_residual_ticks);
-        corrected_ticks = (corrected_ticks > residual) ?
-            (corrected_ticks - residual) : 1UL;
+        uint16_t rounded = (uint16_t)(adjusted + 50);
+        while (rounded >= 100U)
+        {
+            rounded = (uint16_t)(rounded - 100U);
+            units++;
+            if (units > 127U)
+            {
+                return false;
+            }
+        }
     }
 
-    units = (corrected_ticks + ((uint32_t)unit_ticks / 2UL)) /
-            (uint32_t)unit_ticks;
+    if ((units == 0U) || (units > 127U))
+    {
+        return false;
+    }
+
+    quantization_residual_ticks =
+        (int8_t)(adjusted - (int16_t)(units * unit_ticks));
+    *units_out = (uint8_t)units;
+    return true;
+}
+
+/* Rare slow path for pulses longer than one normal Timer5 cycle. */
+static inline bool edge_emit_long_elapsed_from_isr(uint8_t overflows,
+                                                    uint16_t ticks)
+{
+    uint32_t elapsed_ticks = ((uint32_t)overflows << 16) | (uint32_t)ticks;
+    int32_t adjusted = (int32_t)elapsed_ticks +
+                       (int32_t)quantization_residual_ticks;
+    uint32_t units;
+    int32_t residual;
+
+    if (adjusted < 1L)
+    {
+        adjusted = 1L;
+    }
+
+    units = (uint32_t)((adjusted + (int32_t)(unit_ticks / 2U)) /
+                       (int32_t)unit_ticks);
     if (units == 0UL)
     {
         units = 1UL;
     }
+    residual = adjusted - (int32_t)(units * (uint32_t)unit_ticks);
+    quantization_residual_ticks = (int8_t)residual;
 
-    /* This difference is bounded to roughly +/- half a format unit. */
+    if (units <= 15UL)
     {
-        uint16_t remainder = (uint16_t)(corrected_ticks % (uint32_t)unit_ticks);
-        if ((uint16_t)(remainder + (unit_ticks / 2U)) >= unit_ticks)
-        {
-            quantization_residual_ticks = (int16_t)remainder - (int16_t)unit_ticks;
-        }
-        else
-        {
-            quantization_residual_ticks = (int16_t)remainder;
-        }
+        return edge_push_short_units_from_isr((uint8_t)units);
     }
-
     if (units <= 127UL)
     {
-        int8_t encoded = level ? (int8_t)units : (int8_t)(-(int16_t)units);
-        return edge_push_byte_from_isr((uint8_t)encoded);
+        return edge_push_unit_from_isr((uint8_t)units);
     }
-
-    return edge_push_u32_interval_from_isr(level, units);
+    return edge_push_long_units_from_isr(units);
 }
 
-static void edge_disable_pcint_from_isr(void)
+static inline bool edge_emit_elapsed_from_isr(uint8_t overflows,
+                                              uint16_t ticks)
+{
+    uint8_t units;
+
+    if ((overflows == 0U) &&
+        edge_quantize_no_overflow_from_isr(ticks, &units))
+    {
+        if (units <= 15U)
+        {
+            return edge_push_short_units_from_isr(units);
+        }
+        return edge_push_unit_from_isr(units);
+    }
+
+    return edge_emit_long_elapsed_from_isr(overflows, ticks);
+}
+
+/*
+   Snapshot elapsed time since the last accepted edge, then start the next
+   interval from zero. The TOV5 race is handled in the conventional way: when
+   the flag is pending and TCNT5 is in its low half, one overflow has occurred
+   but its ISR has not incremented timer5_overflow_count yet.
+*/
+static inline void edge_take_elapsed_and_restart_from_isr(uint8_t *overflows,
+                                                           uint16_t *ticks)
+{
+    uint8_t count = timer5_overflow_count;
+    uint16_t value = TCNT5;
+
+    if (((TIFR5 & _BV(TOV5)) != 0U) && (value < 0x8000U))
+    {
+        count++;
+    }
+
+    timer5_overflow_count = 0U;
+    TCNT5 = 0U;
+    TIFR5 = _BV(TOV5);
+
+    *overflows = count;
+    *ticks = value;
+}
+
+static inline void edge_stop_pcint_from_isr(void)
 {
     write_edge_monitor_stop();
 }
 
-static void edge_stop_timer_from_isr(void)
+static inline void edge_stop_timer_from_isr(void)
 {
-    edge_disable_pcint_from_isr();
+    edge_stop_pcint_from_isr();
     TIMSK5 &= (uint8_t)~_BV(TOIE5);
     TCCR5B = 0U;
     TCCR5A = 0U;
     TIFR5 = _BV(TOV5);
 }
 
-static void edge_enable_capture_from_isr(void)
+static inline void edge_start_timer_from_isr(uint8_t overflows, uint16_t ticks)
+{
+    TCCR5A = 0U;
+    TCCR5B = 0U;
+    TCNT5 = ticks;
+    timer5_overflow_count = overflows;
+    TIFR5 = _BV(TOV5);
+    TIMSK5 |= _BV(TOIE5);
+    TCCR5B = timer5_clock_bits;
+}
+
+static inline void edge_enable_capture_from_isr(void)
 {
     write_edge_monitor_begin_edge_capture();
 }
@@ -177,36 +331,47 @@ void edge_record_driver_init(void)
         edge_stop_timer_from_isr();
         edge_read_sequence = 0U;
         edge_write_sequence = 0U;
-        timer5_high_word = 0U;
-        last_edge_tick = 0UL;
-        pause_tick = 0UL;
-        active_level = 0U;
-        quantization_residual_ticks = 0;
+        timer5_overflow_count = 0U;
+        paused_counter = 0U;
+        paused_overflows = 0U;
         unit_ticks = 100U;
+        timer5_clock_bits = _BV(CS51);
+        active_level = 0U;
+        initial_level = 0U;
+        pending_short_units = 0U;
+        quantization_residual_ticks = 0;
         edge_state = EDGE_RECORD_DRIVER_STOPPED;
     }
 }
 
 bool edge_record_driver_prepare(uint8_t unit_us)
 {
-    if ((unit_us != 16U) && (unit_us != 50U))
+    edge_record_driver_init();
+
+    if (unit_us == 16U)
+    {
+        /* F_CPU/64 = 250 kHz, exactly four ticks per 16 us. */
+        unit_ticks = 4U;
+        timer5_clock_bits = (uint8_t)(_BV(CS51) | _BV(CS50));
+    }
+    else if (unit_us == 50U)
+    {
+        /* F_CPU/8 = 2 MHz, exactly 100 ticks per 50 us. */
+        unit_ticks = 100U;
+        timer5_clock_bits = _BV(CS51);
+    }
+    else
     {
         edge_state = EDGE_RECORD_DRIVER_BAD_ARGUMENT;
         return false;
     }
 
-    edge_record_driver_init();
-
-    /* Timer5 is F_CPU/8, so 16us=32 ticks and 50us=100 ticks. */
-    unit_ticks = (uint16_t)((uint16_t)unit_us * 2U);
     edge_state = EDGE_RECORD_DRIVER_READY;
     return true;
 }
 
 bool edge_record_driver_start(void)
 {
-    uint32_t now;
-
     if (edge_state != EDGE_RECORD_DRIVER_READY)
     {
         return false;
@@ -217,27 +382,24 @@ bool edge_record_driver_start(void)
         DDRJ &= (uint8_t)~_BV(PJ0);
         PORTJ &= (uint8_t)~_BV(PJ0);
 
-        TCCR5A = 0U;
-        TCCR5B = 0U;
-        TCNT5 = 0U;
-        TIFR5 = _BV(TOV5);
-        timer5_high_word = 0U;
-        TIMSK5 |= _BV(TOIE5);
-        TCCR5B = _BV(CS51);
-
-        now = edge_timer5_now_from_isr();
+        edge_start_timer_from_isr(0U, 0U);
         active_level = mz_write_sample_from_isr();
-        last_edge_tick = now;
-        pause_tick = 0UL;
+        initial_level = active_level;
+        paused_counter = 0U;
+        paused_overflows = 0U;
+        pending_short_units = 0U;
+        quantization_residual_ticks = 0;
         edge_state = EDGE_RECORD_DRIVER_RUNNING;
         edge_enable_capture_from_isr();
     }
-
     return true;
 }
 
 bool edge_record_driver_pause(void)
 {
+    uint8_t overflows;
+    uint16_t ticks;
+
     if (edge_state != EDGE_RECORD_DRIVER_RUNNING)
     {
         return false;
@@ -245,8 +407,11 @@ bool edge_record_driver_pause(void)
 
     ATOMIC_BLOCK(ATOMIC_RESTORESTATE)
     {
-        pause_tick = edge_timer5_now_from_isr();
-        edge_disable_pcint_from_isr();
+        edge_stop_pcint_from_isr();
+        edge_take_elapsed_and_restart_from_isr(&overflows, &ticks);
+        TCCR5B = 0U;
+        paused_overflows = overflows;
+        paused_counter = ticks;
         edge_state = EDGE_RECORD_DRIVER_PAUSED;
     }
     return true;
@@ -254,7 +419,6 @@ bool edge_record_driver_pause(void)
 
 bool edge_record_driver_resume(void)
 {
-    uint32_t now;
     uint8_t level;
     bool ok = true;
 
@@ -265,14 +429,12 @@ bool edge_record_driver_resume(void)
 
     ATOMIC_BLOCK(ATOMIC_RESTORESTATE)
     {
-        now = edge_timer5_now_from_isr();
         level = mz_write_sample_from_isr();
 
         if (level != active_level)
         {
-            /* Simulate an edge exactly at the pause boundary. */
-            if (!edge_emit_interval_from_isr(active_level,
-                                             pause_tick - last_edge_tick))
+            /* Close the old level at pause, start the new level at resume. */
+            if (!edge_emit_elapsed_from_isr(paused_overflows, paused_counter))
             {
                 edge_stop_timer_from_isr();
                 edge_state = EDGE_RECORD_DRIVER_OVERRUN;
@@ -281,13 +443,13 @@ bool edge_record_driver_resume(void)
             else
             {
                 active_level = level;
-                last_edge_tick = now;
+                edge_start_timer_from_isr(0U, 0U);
             }
         }
         else
         {
-            /* Continue same pulse but remove paused time. */
-            last_edge_tick += (now - pause_tick);
+            /* Continue the same pulse; paused wall time is not counted. */
+            edge_start_timer_from_isr(paused_overflows, paused_counter);
         }
 
         if (ok)
@@ -296,37 +458,47 @@ bool edge_record_driver_resume(void)
             edge_enable_capture_from_isr();
         }
     }
-
     return ok;
 }
 
 void edge_record_driver_stop(void)
 {
+    uint8_t overflows = 0U;
+    uint16_t ticks = 0U;
+    bool valid;
+
     ATOMIC_BLOCK(ATOMIC_RESTORESTATE)
     {
-        uint32_t stop_tick;
-        bool valid = ((edge_state == EDGE_RECORD_DRIVER_RUNNING) ||
-                      (edge_state == EDGE_RECORD_DRIVER_PAUSED));
-        if (valid)
+        valid = ((edge_state == EDGE_RECORD_DRIVER_RUNNING) ||
+                 (edge_state == EDGE_RECORD_DRIVER_PAUSED));
+        if (!valid)
         {
-            stop_tick = (edge_state == EDGE_RECORD_DRIVER_PAUSED) ?
-                pause_tick : edge_timer5_now_from_isr();
+            return;
+        }
 
-            edge_disable_pcint_from_isr();
-            if (!edge_emit_interval_from_isr(active_level,
-                                             stop_tick - last_edge_tick))
-            {
-                edge_stop_timer_from_isr();
-                edge_state = EDGE_RECORD_DRIVER_OVERRUN;
-            }
-            else
-            {
-                TIMSK5 &= (uint8_t)~_BV(TOIE5);
-                TCCR5B = 0U;
-                TCCR5A = 0U;
-                TIFR5 = _BV(TOV5);
-                edge_state = EDGE_RECORD_DRIVER_STOPPED;
-            }
+        edge_stop_pcint_from_isr();
+        if (edge_state == EDGE_RECORD_DRIVER_RUNNING)
+        {
+            edge_take_elapsed_and_restart_from_isr(&overflows, &ticks);
+        }
+        else
+        {
+            overflows = paused_overflows;
+            ticks = paused_counter;
+        }
+
+        TCCR5B = 0U;
+        TIMSK5 &= (uint8_t)~_BV(TOIE5);
+        TIFR5 = _BV(TOV5);
+
+        if (!edge_emit_elapsed_from_isr(overflows, ticks) ||
+            !edge_flush_pending_short_from_isr())
+        {
+            edge_state = EDGE_RECORD_DRIVER_OVERRUN;
+        }
+        else
+        {
+            edge_state = EDGE_RECORD_DRIVER_STOPPED;
         }
     }
 }
@@ -336,6 +508,7 @@ void edge_record_driver_abort(void)
     ATOMIC_BLOCK(ATOMIC_RESTORESTATE)
     {
         edge_stop_timer_from_isr();
+        pending_short_units = 0U;
         edge_state = EDGE_RECORD_DRIVER_STOPPED;
     }
 }
@@ -365,6 +538,7 @@ uint16_t edge_record_driver_available_bytes(void)
 bool edge_record_driver_pop_byte(uint8_t *value)
 {
     bool result = false;
+
     if (value == NULL)
     {
         return false;
@@ -392,8 +566,8 @@ uint8_t edge_record_driver_fill_percent(void)
 
 uint32_t edge_record_driver_get_captured_active_ticks(void)
 {
-    uint32_t now;
-    uint32_t start;
+    uint8_t overflows;
+    uint16_t ticks;
     edge_record_driver_state_t state = edge_record_driver_get_state();
 
     if ((state != EDGE_RECORD_DRIVER_RUNNING) &&
@@ -404,34 +578,66 @@ uint32_t edge_record_driver_get_captured_active_ticks(void)
 
     ATOMIC_BLOCK(ATOMIC_RESTORESTATE)
     {
-        now = (state == EDGE_RECORD_DRIVER_PAUSED) ?
-            pause_tick : edge_timer5_now_from_isr();
-        start = last_edge_tick;
+        if (state == EDGE_RECORD_DRIVER_PAUSED)
+        {
+            overflows = paused_overflows;
+            ticks = paused_counter;
+        }
+        else
+        {
+            overflows = timer5_overflow_count;
+            ticks = TCNT5;
+            if (((TIFR5 & _BV(TOV5)) != 0U) && (ticks < 0x8000U))
+            {
+                overflows++;
+            }
+        }
     }
-    return now - start;
+    return ((uint32_t)overflows << 16) | (uint32_t)ticks;
+}
+
+uint8_t edge_record_driver_get_initial_level(void)
+{
+    uint8_t result;
+    ATOMIC_BLOCK(ATOMIC_RESTORESTATE)
+    {
+        result = initial_level;
+    }
+    return result;
 }
 
 ISR(TIMER5_OVF_vect)
 {
-    timer5_high_word++;
-}
-
-void edge_record_driver_on_write_edge_from_isr(uint8_t new_level)
-{
-    uint32_t now;
-
     if (edge_state != EDGE_RECORD_DRIVER_RUNNING)
     {
         return;
     }
 
+    if (timer5_overflow_count == 0xFFU)
+    {
+        edge_stop_timer_from_isr();
+        edge_state = EDGE_RECORD_DRIVER_TOO_LONG;
+        return;
+    }
+    timer5_overflow_count++;
+}
+
+void edge_record_driver_on_write_edge_from_isr(uint8_t new_level)
+{
+    uint8_t overflows;
+    uint16_t ticks;
+
+    if (edge_state != EDGE_RECORD_DRIVER_RUNNING)
+    {
+        return;
+    }
     if (new_level == active_level)
     {
         return;
     }
 
-    now = edge_timer5_now_from_isr();
-    if (!edge_emit_interval_from_isr(active_level, now - last_edge_tick))
+    edge_take_elapsed_and_restart_from_isr(&overflows, &ticks);
+    if (!edge_emit_elapsed_from_isr(overflows, ticks))
     {
         edge_stop_timer_from_isr();
         edge_state = EDGE_RECORD_DRIVER_OVERRUN;
@@ -439,5 +645,4 @@ void edge_record_driver_on_write_edge_from_isr(uint8_t new_level)
     }
 
     active_level = new_level;
-    last_edge_tick = now;
 }

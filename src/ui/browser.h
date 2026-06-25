@@ -22,6 +22,10 @@ bool browser_selected_is_directory(void);
 void browser_save_position(void);
 void browser_restore_saved_position(void);
 
+/* Borrow/release browser-only history RAM while LEP/L16 RECORD is active. */
+void browser_begin_record_scratch(void);
+void browser_end_record_scratch(void);
+
 /* Current browser directory is used as the target for RECxxxx.WAV files. */
 const char* browser_get_current_path(void);
 

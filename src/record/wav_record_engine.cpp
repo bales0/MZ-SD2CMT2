@@ -67,44 +67,28 @@ static void wav_record_put_le32(uint8_t *target, uint32_t value)
 
 static bool wav_record_make_paths(const char *directory_path)
 {
-    if ((directory_path == NULL) || (directory_path[0] == '\0'))
+    uint16_t sequence;
+    int length;
+
+    if (!sdcard_next_record_sequence(directory_path, &sequence))
     {
-        wav_record_set_error("BAD DIRECTORY");
+        wav_record_set_error(sdcard_last_error());
         return false;
     }
 
-    for (uint16_t index = 1U; index <= 9999U; index++)
+    length = snprintf(record_full_path, sizeof(record_full_path),
+                      "%s/REC%04u.WAV", directory_path,
+                      (unsigned int)sequence);
+
+    if ((length <= 0) || ((size_t)length >= sizeof(record_full_path)))
     {
-        int length;
-
-        if (strcmp(directory_path, "/") == 0)
-        {
-            length = snprintf(record_full_path, sizeof(record_full_path),
-                              "/REC%04u.WAV", (unsigned int)index);
-        }
-        else
-        {
-            length = snprintf(record_full_path, sizeof(record_full_path),
-                              "%s/REC%04u.WAV", directory_path,
-                              (unsigned int)index);
-        }
-
-        if ((length <= 0) || ((size_t)length >= sizeof(record_full_path)))
-        {
-            wav_record_set_error("PATH TOO LONG");
-            return false;
-        }
-
-        if (!sdcard_file_exists(record_full_path))
-        {
-            snprintf(record_filename, sizeof(record_filename),
-                     "REC%04u.WAV", (unsigned int)index);
-            return true;
-        }
+        wav_record_set_error("PATH TOO LONG");
+        return false;
     }
 
-    wav_record_set_error("REC NAMES FULL");
-    return false;
+    snprintf(record_filename, sizeof(record_filename), "REC%04u.WAV",
+             (unsigned int)sequence);
+    return true;
 }
 
 static void wav_record_stop_close_error(const char *text)

@@ -27,12 +27,23 @@ uint16_t sdcard_count_root_entries(uint16_t max_entries);
 bool sdcard_read_root_entry_by_index(uint16_t index, sdcard_entry_t *entry);
 
 /*
-    Sequential one-file stream for format readers and in-place recording conversion.
+    Sequential one-file stream for format readers and direct recording output.
     All functions are foreground only; never use them from a timer ISR.
 */
 bool sdcard_file_open_read(const char *path);
 bool sdcard_file_open_write(const char *path);
 bool sdcard_file_exists(const char *path);
+
+/* Creates directory_path when absent and verifies that it is a directory. */
+bool sdcard_ensure_directory(const char *directory_path);
+
+/*
+    Finds the next shared RECxxxx sequence number in directory_path. Files
+    REC0001.WAV, REC0001.LEP and REC0001.L16 share one namespace, so the
+    result is one greater than the highest compatible existing number.
+*/
+bool sdcard_next_record_sequence(const char *directory_path,
+                                 uint16_t *next_sequence);
 
 int16_t sdcard_file_read(void *buffer, uint16_t size);
 int16_t sdcard_file_write(const void *buffer, uint16_t size);
@@ -56,7 +67,7 @@ uint32_t sdcard_file_position(void);
 bool sdcard_file_is_open(void);
 void sdcard_file_close(void);
 
-/* Remove a closed file. Used only after successful raw->WAV conversion. */
+/* Remove a closed file. Used after cancelled or failed recording. */
 bool sdcard_file_remove(const char *path);
 
 const char *sdcard_last_error(void);
