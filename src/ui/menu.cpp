@@ -64,7 +64,7 @@ menu_action_t menu_handle_event(button_event_t event)
             if (selected_item == MENU_ITEM_PLAY_MODE)
             {
                 play_mode = (play_mode == MENU_PLAY_MODE_NORMAL) ?
-                    MENU_PLAY_MODE_ULTRA_TURBO : MENU_PLAY_MODE_NORMAL;
+                    MENU_PLAY_MODE_ULTRA_FAST : MENU_PLAY_MODE_NORMAL;
             }
             else if (selected_item == MENU_ITEM_INVERT_SIGNAL)
             {
@@ -94,7 +94,7 @@ void menu_render(void)
         case MENU_ITEM_PLAY_MODE:
             lcd_print_fixed(0, ">PLAY MODE");
             lcd_print_fixed(1, play_mode == MENU_PLAY_MODE_NORMAL ?
-                            " NORMAL" : " ULTRA TURBO");
+                            " NORMAL" : " ULTRA FAST");
             break;
 
         case MENU_ITEM_INVERT_SIGNAL:

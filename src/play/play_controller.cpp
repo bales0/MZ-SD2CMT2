@@ -53,6 +53,15 @@ static bool play_controller_pause_engine(void)
         mz_sense_set(true);
         return false;
     }
+    if (play_engine_get_state() == PLAY_ENGINE_STATE_READY)
+    {
+        /* ULTRA FAST may finish while consuming the jumper-block MOTOR edge. */
+        session_state = PLAY_CONTROLLER_STATE_READY;
+        waiting_for_motor = false;
+        paused_by_motor = false;
+        return true;
+    }
+
     session_state = PLAY_CONTROLLER_STATE_PAUSED;
     return true;
 }
@@ -210,7 +219,8 @@ void play_controller_service(void)
         case PLAY_ENGINE_STATE_READY:
         case PLAY_ENGINE_STATE_STOPPED:
         default:
-            if (session_state == PLAY_CONTROLLER_STATE_PLAYING)
+            if ((session_state == PLAY_CONTROLLER_STATE_PLAYING) ||
+                (session_state == PLAY_CONTROLLER_STATE_PAUSED))
             {
                 /* EOF returns READY but must not auto-repeat while MOTOR stays high. */
                 session_state = PLAY_CONTROLLER_STATE_READY;

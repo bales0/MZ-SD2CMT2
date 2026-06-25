@@ -41,6 +41,25 @@ void mz_sense_set(bool level)
     digitalWrite(MZIO_PIN_SENSE, level ? HIGH : LOW);
 }
 
+void mz_read_set_fast(bool level)
+{
+    mz_read_set_from_isr(level ? 1U : 0U);
+}
+
+void mz_sense_set_fast(bool level)
+{
+    if (level)
+    {
+        PORTD |= _BV(PD3);
+        mz_sense_level = 1U;
+    }
+    else
+    {
+        PORTD &= (uint8_t)~_BV(PD3);
+        mz_sense_level = 0U;
+    }
+}
+
 void mz_led_set(bool level)
 {
     mz_led_level = level ? 1U : 0U;

@@ -3,6 +3,7 @@
 
 #include "play_engine.h"
 #include "edge_playback.h"
+#include "mzf_playback.h"
 #include "../drivers/mzio.h"
 #include "../drivers/wav_playback_driver.h"
 #include "../streams/wav_sample_stream.h"
@@ -120,6 +121,21 @@ static bool play_engine_prepare_edge(void)
     return true;
 }
 
+static bool play_engine_prepare_mzf(void)
+{
+    /* MZF/MZT/M12 use their fixed native polarity; INVERT SIG. applies
+       only to WAV and LEP/L16 transports. */
+    if (!mzf_playback_prepare(prepared_full_path, prepared_format,
+                              prepared_play_mode))
+    {
+        play_engine_set_error(mzf_playback_get_error_text());
+        return false;
+    }
+    source_total = mzf_playback_get_total_bytes();
+    source_played = 0UL;
+    return true;
+}
+
 static bool play_engine_prepare_saved_source(void)
 {
     bool ok;
@@ -141,9 +157,13 @@ static bool play_engine_prepare_saved_source(void)
     {
         ok = play_engine_prepare_edge();
     }
+    else if (file_format_is_sharp_tape(prepared_format))
+    {
+        ok = play_engine_prepare_mzf();
+    }
     else
     {
-        play_engine_set_error("MZF NOT READY");
+        play_engine_set_error("BAD FORMAT");
         return false;
     }
 
@@ -169,6 +189,7 @@ void play_engine_init(void)
     play_engine_clear_error();
     wav_playback_driver_init();
     edge_playback_init();
+    mzf_playback_init();
 }
 
 bool play_engine_prepare(const play_engine_config_t *config)
@@ -210,6 +231,14 @@ bool play_engine_start(void)
         }
         mz_sense_set(false);
     }
+    else if (file_format_is_sharp_tape(prepared_format))
+    {
+        if (!mzf_playback_start())
+        {
+            play_engine_set_error(mzf_playback_get_error_text());
+            return false;
+        }
+    }
     else
     {
         if (!edge_playback_start())
@@ -236,6 +265,24 @@ bool play_engine_pause(void)
             return false;
         }
     }
+    else if (file_format_is_sharp_tape(prepared_format))
+    {
+        if (!mzf_playback_pause())
+        {
+            play_engine_set_error(mzf_playback_get_error_text());
+            return false;
+        }
+
+        /* ULTRA FAST completes from the jumper-block MOTOR edge itself. */
+        if (mzf_playback_get_state() == MZF_PLAYBACK_FINISHED)
+        {
+            source_played = mzf_playback_get_consumed_bytes();
+            source_total = mzf_playback_get_total_bytes();
+            source_reprepare_required = true;
+            engine_state = PLAY_ENGINE_STATE_READY;
+            return true;
+        }
+    }
     else if (!edge_playback_pause())
     {
         play_engine_set_error(edge_playback_get_error_text());
@@ -258,6 +305,14 @@ bool play_engine_resume(void)
             return false;
         }
     }
+    else if (file_format_is_sharp_tape(prepared_format))
+    {
+        if (!mzf_playback_resume())
+        {
+            play_engine_set_error(mzf_playback_get_error_text());
+            return false;
+        }
+    }
     else if (!edge_playback_resume())
     {
         play_engine_set_error(edge_playback_get_error_text());
@@ -273,6 +328,7 @@ void play_engine_stop(void)
     wav_playback_driver_stop();
     wav_sample_stream_close();
     edge_playback_stop();
+    mzf_playback_stop();
     mz_sense_set(true);
     source_total = 0UL;
     source_played = 0UL;
@@ -316,6 +372,32 @@ void play_engine_service(void)
         return;
     }
 
+    if (file_format_is_sharp_tape(prepared_format))
+    {
+        mzf_playback_service();
+        source_played = mzf_playback_get_consumed_bytes();
+        source_total = mzf_playback_get_total_bytes();
+        switch (mzf_playback_get_state())
+        {
+            case MZF_PLAYBACK_RUNNING:
+            case MZF_PLAYBACK_PAUSED:
+                break;
+            case MZF_PLAYBACK_FINISHED:
+                source_reprepare_required = true;
+                engine_state = PLAY_ENGINE_STATE_READY;
+                break;
+            case MZF_PLAYBACK_UNDERRUN:
+            case MZF_PLAYBACK_IO_ERROR:
+            case MZF_PLAYBACK_BAD_FILE:
+            case MZF_PLAYBACK_ULTRA_ERROR:
+                play_engine_set_error(mzf_playback_get_error_text());
+                break;
+            default:
+                break;
+        }
+        return;
+    }
+
     edge_playback_service();
     source_played = edge_playback_get_consumed_bytes();
     source_total = edge_playback_get_total_bytes();
@@ -347,6 +429,8 @@ uint8_t play_engine_get_buffer_fill_percent(void)
     uint32_t percent;
     if ((prepared_format == FILE_FORMAT_LEP) || (prepared_format == FILE_FORMAT_L16))
         return edge_playback_get_buffer_fill_percent();
+    if (file_format_is_sharp_tape(prepared_format))
+        return mzf_playback_get_buffer_fill_percent();
     if (prepared_format != FILE_FORMAT_WAV) return 0U;
     percent = ((uint32_t)wav_sample_stream_available() * 100UL) /
               WAV_SAMPLE_STREAM_CAPACITY_SAMPLES;

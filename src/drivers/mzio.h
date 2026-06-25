@@ -16,6 +16,10 @@ void mz_read_set(bool level);
 void mz_sense_set(bool level);
 void mz_led_set(bool level);
 
+/* Foreground transport helpers for the ULTRA FAST handshake. */
+void mz_read_set_fast(bool level);
+void mz_sense_set_fast(bool level);
+
 bool mz_read_get(void);
 bool mz_sense_get(void);
 bool mz_led_get(void);

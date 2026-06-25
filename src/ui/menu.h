@@ -7,7 +7,7 @@
 typedef enum
 {
     MENU_PLAY_MODE_NORMAL = 0,
-    MENU_PLAY_MODE_ULTRA_TURBO
+    MENU_PLAY_MODE_ULTRA_FAST
 } menu_play_mode_t;
 
 /*

@@ -31,10 +31,18 @@ static bool extension_equals(const char *filename, const char *extension)
     return true;
 }
 
+bool file_format_is_sharp_tape(file_format_t format)
+{
+    return (format == FILE_FORMAT_MZF) ||
+           (format == FILE_FORMAT_MZT) ||
+           (format == FILE_FORMAT_M12);
+}
+
 file_format_t file_format_detect_from_name(const char *filename)
 {
     if (extension_equals(filename, ".MZF")) return FILE_FORMAT_MZF;
     if (extension_equals(filename, ".MZT")) return FILE_FORMAT_MZT;
+    if (extension_equals(filename, ".M12")) return FILE_FORMAT_M12;
     if (extension_equals(filename, ".LEP")) return FILE_FORMAT_LEP;
     if (extension_equals(filename, ".L16")) return FILE_FORMAT_L16;
     if (extension_equals(filename, ".WAV")) return FILE_FORMAT_WAV;
@@ -47,6 +55,7 @@ const char* file_format_to_label(file_format_t format)
     {
         case FILE_FORMAT_MZF: return "MZF";
         case FILE_FORMAT_MZT: return "MZT";
+        case FILE_FORMAT_M12: return "M12";
         case FILE_FORMAT_LEP: return "LEP";
         case FILE_FORMAT_L16: return "L16";
         case FILE_FORMAT_WAV: return "WAV";

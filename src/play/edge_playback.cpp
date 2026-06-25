@@ -1,4 +1,5 @@
 #include "edge_playback.h"
+#include "mzf_playback.h"
 
 #include <Arduino.h>
 #include <avr/io.h>
@@ -417,7 +418,15 @@ uint32_t edge_playback_get_consumed_bytes(void)
 
 uint32_t edge_playback_get_total_bytes(void) { return edge_total_bytes; }
 
-ISR(TIMER3_COMPB_vect)
+/*
+    Timer3 compare-B has exactly one hardware vector in the complete firmware.
+    LEP/L16 and MZF/MZT both use it, but play_engine guarantees that only one
+    source is running at a time.  Keep the vector here and let the MZF module
+    explicitly claim a compare event only while its NORMAL PWM transport owns
+    Timer3.  ULTRA FAST itself is foreground handshake code and never claims
+    Timer3 compare-B.
+*/
+static void edge_playback_timer3_compb_from_isr(void)
 {
     int8_t next;
 
@@ -453,4 +462,14 @@ ISR(TIMER3_COMPB_vect)
 
     edge_slot_remaining_ticks = edge_set_slot_level_from_isr(next);
     edge_schedule_next_chunk_from_isr();
+}
+
+ISR(TIMER3_COMPB_vect)
+{
+    if (mzf_playback_timer3_compb_from_isr())
+    {
+        return;
+    }
+
+    edge_playback_timer3_compb_from_isr();
 }
