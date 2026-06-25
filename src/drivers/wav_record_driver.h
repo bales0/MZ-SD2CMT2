@@ -17,6 +17,7 @@ typedef enum
     WAV_RECORD_DRIVER_STOPPED = 0,
     WAV_RECORD_DRIVER_READY,
     WAV_RECORD_DRIVER_RUNNING,
+    WAV_RECORD_DRIVER_PAUSED,
     WAV_RECORD_DRIVER_OVERRUN,
     WAV_RECORD_DRIVER_BAD_RATE,
     WAV_RECORD_DRIVER_BAD_ARGUMENT
@@ -28,6 +29,8 @@ void wav_record_driver_init(void);
 bool wav_record_driver_prepare(uint32_t sample_rate);
 
 bool wav_record_driver_start(void);
+bool wav_record_driver_pause(void);
+bool wav_record_driver_resume(void);
 
 /*
     Stops Timer1 and preserves a final 1..7 sample partial byte for the

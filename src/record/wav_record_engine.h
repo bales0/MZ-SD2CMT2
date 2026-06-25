@@ -8,6 +8,7 @@ typedef enum
 {
     WAV_RECORD_ENGINE_STOPPED = 0,
     WAV_RECORD_ENGINE_RECORDING,
+    WAV_RECORD_ENGINE_PAUSED,
     WAV_RECORD_ENGINE_FINALIZING,
     WAV_RECORD_ENGINE_FINISHED,
     WAV_RECORD_ENGINE_ERROR
@@ -25,10 +26,16 @@ void wav_record_engine_init(void);
     HIGH=235) and appends it to the WAV file. No TMP file and no post-stop
     conversion is used.
 */
+/* Finds the next RECxxxx.WAV name without creating a file. */
+bool wav_record_engine_preview_filename(const char *directory_path);
+
 bool wav_record_engine_start(const char *directory_path,
                              uint32_t sample_rate);
 
+bool wav_record_engine_pause(void);
+bool wav_record_engine_resume(void);
 void wav_record_engine_request_stop(void);
+void wav_record_engine_cancel(void);
 
 /* Foreground only. Call frequently while RECORD is active. */
 void wav_record_engine_service(void);

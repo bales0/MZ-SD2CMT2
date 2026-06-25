@@ -140,6 +140,44 @@ bool wav_record_driver_start(void)
     return true;
 }
 
+bool wav_record_driver_pause(void)
+{
+    if (driver_state != WAV_RECORD_DRIVER_RUNNING)
+    {
+        return false;
+    }
+
+    ATOMIC_BLOCK(ATOMIC_RESTORESTATE)
+    {
+        TIMSK1 &= (uint8_t)~_BV(OCIE1A);
+        TCCR1B = 0U;
+        TIFR1 = _BV(OCF1A);
+        driver_state = WAV_RECORD_DRIVER_PAUSED;
+    }
+    return true;
+}
+
+bool wav_record_driver_resume(void)
+{
+    if (driver_state != WAV_RECORD_DRIVER_PAUSED)
+    {
+        return false;
+    }
+
+    ATOMIC_BLOCK(ATOMIC_RESTORESTATE)
+    {
+        TCNT1 = 0U;
+        OCR1A = (uint16_t)(timer_base_ticks - 1U);
+        TCCR1A = 0U;
+        TCCR1B = _BV(WGM12);
+        TIFR1 = _BV(OCF1A);
+        driver_state = WAV_RECORD_DRIVER_RUNNING;
+        TIMSK1 |= _BV(OCIE1A);
+        TCCR1B = (uint8_t)(_BV(WGM12) | _BV(CS10));
+    }
+    return true;
+}
+
 void wav_record_driver_stop(void)
 {
     uint8_t local_pack_byte;

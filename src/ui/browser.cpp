@@ -7,7 +7,7 @@
 
 #define MAX_DIR_ENTRIES 999
 #define BROWSER_PATH_MAX 96
-#define BROWSER_NAME_MAX 64
+#define BROWSER_NAME_MAX 32
 #define BROWSER_FULL_PATH_MAX 160
 #define BROWSER_PARENT_STACK_MAX 16
 #define MESSAGE_HOLD_MS 1200
@@ -29,6 +29,7 @@ static bool parent_stack_is_dir[BROWSER_PARENT_STACK_MAX];
 static uint16_t parent_stack_index[BROWSER_PARENT_STACK_MAX];
 static char status_message[17];
 static uint32_t status_message_until_ms = 0;
+static bool right_locked_until_release = false;
 
 static void lcd_print_line(uint8_t row, const char *text)
 {
@@ -347,6 +348,7 @@ static browser_action_t browser_request_record(void)
     */
     if (!sd_ok)
     {
+        right_locked_until_release = true;
         browser_refresh_sd();
         return BROWSER_ACTION_NONE;
     }
@@ -400,6 +402,7 @@ void browser_init(bool initial_sd_ok)
     parent_stack_depth = 0;
     status_message[0] = '\0';
     status_message_until_ms = 0;
+    right_locked_until_release = false;
     browser_build_dir_index();
 }
 
@@ -422,16 +425,39 @@ browser_action_t browser_handle_event(button_event_t event)
             browser_go_root();
             return BROWSER_ACTION_NONE;
         case BUTTON_EVENT_RIGHT_SHORT:
-        case BUTTON_EVENT_RIGHT_LONG:
+            if (right_locked_until_release) return BROWSER_ACTION_NONE;
             return browser_request_record();
+        case BUTTON_EVENT_RIGHT_LONG:
+            if (right_locked_until_release) return BROWSER_ACTION_NONE;
+            if (!sd_ok)
+            {
+                right_locked_until_release = true;
+                browser_refresh_sd();
+                return BROWSER_ACTION_NONE;
+            }
+            if (!sdcard_init())
+            {
+                sd_ok = false;
+                browser_build_dir_index();
+                return BROWSER_ACTION_NONE;
+            }
+            return BROWSER_ACTION_RECORD_MENU_REQUESTED;
         case BUTTON_EVENT_SELECT_SHORT:
             return browser_select_current();
         case BUTTON_EVENT_SELECT_LONG:
-            return BROWSER_ACTION_MENU_REQUESTED;
+            return BROWSER_ACTION_PLAY_MENU_REQUESTED;
         default:
             break;
     }
     return BROWSER_ACTION_NONE;
+}
+
+void browser_service(void)
+{
+    if (right_locked_until_release && (keypad_get_button() != BUTTON_RIGHT))
+    {
+        right_locked_until_release = false;
+    }
 }
 
 void browser_render(void)
@@ -530,5 +556,9 @@ const char* browser_get_current_path(void)
 
 void browser_refresh(void)
 {
-    browser_refresh_sd();
+    /* The file was just saved/deleted on an already mounted card.
+       Re-scan silently: do not show the SD INIT splash on return. */
+    browser_build_dir_index();
+    browser_find_saved_position();
+    lcd_clear();
 }

@@ -10,59 +10,47 @@
 #include "play/play_controller.h"
 #include "ui/browser.h"
 #include "ui/menu.h"
+#include "ui/record_menu.h"
 #include "ui/play_screen.h"
 #include "ui/record_screen.h"
-#include "record/wav_record_engine.h"
+#include "record/record_engine.h"
 
 #define CALIBRATION_PRESSED_THRESHOLD 900
 #define CALIBRATION_RELEASED_THRESHOLD 900
 #define FORCE_CALIBRATION_RIGHT_THRESHOLD 50
-
-/*
-    During fixed-rate WAV output, SD refill has priority over UI traffic.
-    Polling the analog keypad on every tight loop wastes a sizeable part of
-    the foreground budget. 5 ms still gives normal debounce/short/long press
-    behavior, and 250 ms display updates are sufficient for progress.
-*/
-#define WAV_PLAY_KEYPAD_POLL_MS 5U
-#define WAV_PLAY_LCD_UPDATE_MS 250U
-#define WAV_RECORD_KEYPAD_POLL_MS 5U
-#define WAV_RECORD_LCD_UPDATE_MS 250U
-#define WAV_RECORD_FINISHED_HOLD_MS 1200U
+#define ACTIVE_KEYPAD_POLL_MS 5U
+#define ACTIVE_LCD_UPDATE_MS 250U
 
 typedef enum
 {
     APP_SCREEN_BROWSER = 0,
-    APP_SCREEN_PLAY_STUB,
+    APP_SCREEN_PLAY,
     APP_SCREEN_RECORD,
-    APP_SCREEN_MENU
+    APP_SCREEN_PLAY_MENU,
+    APP_SCREEN_RECORD_MENU
 } app_screen_t;
 
-static uint32_t last_lcd_update_ms = 0;
-static uint32_t last_play_keypad_poll_ms = 0;
-static uint32_t last_record_keypad_poll_ms = 0;
-static uint32_t record_finished_since_ms = 0;
+static uint32_t last_lcd_update_ms = 0U;
+static uint32_t last_active_keypad_poll_ms = 0U;
 static bool sd_ok = false;
 static app_screen_t current_screen = APP_SCREEN_BROWSER;
 
 static void lcd_print_line(uint8_t row, const char *text)
 {
     char line[17];
-    snprintf(line, sizeof(line), "%-16s", text);
+    snprintf(line, sizeof(line), "%-16s", text != NULL ? text : "");
     lcd_set_cursor(0, row);
     lcd_print(line);
 }
 
 static uint16_t adc_average(uint8_t samples)
 {
-    uint32_t sum = 0;
-
-    for (uint8_t i = 0; i < samples; i++)
+    uint32_t sum = 0UL;
+    for (uint8_t i = 0U; i < samples; ++i)
     {
         sum += keypad_read_raw();
         delay(5);
     }
-
     return (uint16_t)(sum / samples);
 }
 
@@ -70,12 +58,7 @@ static void wait_for_release(void)
 {
     lcd_print_line(0, "RELEASE ALL");
     lcd_print_line(1, "WAIT...");
-
-    while (keypad_read_raw() < CALIBRATION_RELEASED_THRESHOLD)
-    {
-        delay(20);
-    }
-
+    while (keypad_read_raw() < CALIBRATION_RELEASED_THRESHOLD) delay(20);
     delay(200);
 }
 
@@ -84,12 +67,7 @@ static uint16_t calibrate_none(void)
     lcd_clear();
     lcd_print_line(0, "CAL NONE");
     lcd_print_line(1, "RELEASE ALL");
-
-    while (keypad_read_raw() < CALIBRATION_RELEASED_THRESHOLD)
-    {
-        delay(20);
-    }
-
+    while (keypad_read_raw() < CALIBRATION_RELEASED_THRESHOLD) delay(20);
     delay(500);
     return adc_average(32);
 }
@@ -97,31 +75,19 @@ static uint16_t calibrate_none(void)
 static uint16_t calibrate_button(const char *name)
 {
     char line0[17];
-
+    char line1[17];
     snprintf(line0, sizeof(line0), "PRESS %-10s", name);
-
     lcd_clear();
     lcd_print_line(0, line0);
     lcd_print_line(1, "WAIT INPUT");
-
-    while (keypad_read_raw() > CALIBRATION_PRESSED_THRESHOLD)
-    {
-        delay(20);
-    }
-
+    while (keypad_read_raw() > CALIBRATION_PRESSED_THRESHOLD) delay(20);
     delay(250);
-
     uint16_t value = adc_average(32);
-    char line1[17];
-
     snprintf(line1, sizeof(line1), "ADC:%4u", value);
-
     lcd_print_line(0, name);
     lcd_print_line(1, line1);
     delay(700);
-
     wait_for_release();
-
     return value;
 }
 
@@ -132,53 +98,19 @@ static bool force_calibration_requested(void)
 
 static bool run_keypad_calibration(keypad_calibration_t *calibration)
 {
-    if (calibration == NULL)
-    {
-        return false;
-    }
-
+    if (calibration == NULL) return false;
     lcd_clear();
     lcd_print_line(0, "KEYPAD");
     lcd_print_line(1, "CALIBRATION");
     delay(1200);
-
     calibration->none = calibrate_none();
     calibration->up = calibrate_button("UP");
     calibration->down = calibrate_button("DOWN");
     calibration->left = calibrate_button("LEFT");
     calibration->right = calibrate_button("RIGHT");
     calibration->select = calibrate_button("SELECT");
-
-    if (!keypad_calibration_is_valid(calibration))
-    {
-        lcd_clear();
-        lcd_print_line(0, "CAL INVALID");
-        lcd_print_line(1, "NOT SAVED");
-        delay(2000);
-        return false;
-    }
-
-    lcd_clear();
-    lcd_print_line(0, "SAVING");
-    lcd_print_line(1, "EEPROM");
-
-    bool saved = calibration_store_save_keypad(calibration);
-    delay(800);
-    lcd_clear();
-
-    if (saved)
-    {
-        lcd_print_line(0, "CALIBRATION");
-        lcd_print_line(1, "SAVED");
-    }
-    else
-    {
-        lcd_print_line(0, "CALIBRATION");
-        lcd_print_line(1, "SAVE ERROR");
-    }
-
-    delay(1200);
-    return saved;
+    if (!keypad_calibration_is_valid(calibration)) return false;
+    return calibration_store_save_keypad(calibration);
 }
 
 static void app_enter_browser(void)
@@ -188,79 +120,66 @@ static void app_enter_browser(void)
     lcd_clear();
 }
 
-static void app_enter_play_stub(const char *filename, const char *full_path)
+static void app_enter_play(const char *filename, const char *full_path)
 {
     browser_save_position();
-    play_controller_start_session(filename, full_path, menu_get_play_mode(), menu_get_invert_signal());
-    current_screen = APP_SCREEN_PLAY_STUB;
+    play_controller_start_session(filename, full_path,
+                                  menu_get_play_mode(),
+                                  menu_get_invert_signal(),
+                                  menu_get_play_control_mode());
+    current_screen = APP_SCREEN_PLAY;
     lcd_clear();
 }
 
 static void app_enter_record(void)
 {
+    record_engine_config_t config;
     browser_save_position();
-
-    /*
-        RIGHT short starts immediately. The engine creates the next free
-        REC0001.WAV ... REC9999.WAV in the current browser directory.
-    */
-    wav_record_engine_start(
-        browser_get_current_path(),
-        menu_get_record_sample_rate()
-    );
-
-    record_finished_since_ms = 0U;
+    config.format = record_menu_get_format();
+    config.wav_sample_rate = record_menu_get_wav_sample_rate();
+    config.control_mode = record_menu_get_control_mode();
+    (void)record_engine_start(browser_get_current_path(), &config);
     current_screen = APP_SCREEN_RECORD;
-    lcd_clear();
-}
-
-static void app_enter_menu(void)
-{
-    browser_save_position();
-    current_screen = APP_SCREEN_MENU;
     lcd_clear();
 }
 
 static void app_handle_browser_event(button_event_t event)
 {
     browser_action_t action = browser_handle_event(event);
-
     switch (action)
     {
         case BROWSER_ACTION_FILE_SELECTED:
-            app_enter_play_stub(browser_get_selected_name(), browser_get_selected_full_path());
+            app_enter_play(browser_get_selected_name(), browser_get_selected_full_path());
             break;
-
         case BROWSER_ACTION_RECORD_REQUESTED:
             app_enter_record();
             break;
-
-        case BROWSER_ACTION_MENU_REQUESTED:
-            app_enter_menu();
+        case BROWSER_ACTION_PLAY_MENU_REQUESTED:
+            browser_save_position();
+            current_screen = APP_SCREEN_PLAY_MENU;
+            lcd_clear();
             break;
-
-        case BROWSER_ACTION_NONE:
+        case BROWSER_ACTION_RECORD_MENU_REQUESTED:
+            browser_save_position();
+            current_screen = APP_SCREEN_RECORD_MENU;
+            lcd_clear();
+            break;
         default:
             break;
     }
 }
 
-static void app_handle_play_stub_event(button_event_t event)
+static void app_handle_play_event(button_event_t event)
 {
-    play_screen_action_t action = play_screen_handle_event(event);
-
-    switch (action)
+    switch (play_screen_handle_event(event))
     {
         case PLAY_SCREEN_ACTION_TOGGLE_PLAY:
             play_controller_toggle_play_pause();
             break;
-
         case PLAY_SCREEN_ACTION_BACK:
             play_controller_stop();
             app_enter_browser();
             break;
-
-        case PLAY_SCREEN_ACTION_NONE:
         default:
             break;
     }
@@ -269,35 +188,45 @@ static void app_handle_play_stub_event(button_event_t event)
 static void app_handle_record_event(button_event_t event)
 {
     record_screen_action_t action = record_screen_handle_event(event);
-    wav_record_engine_state_t state = wav_record_engine_get_state();
+    record_engine_state_t state = record_engine_get_state();
 
-    if (action != RECORD_SCREEN_ACTION_STOP_OR_BACK)
+    if (action == RECORD_SCREEN_ACTION_TOGGLE_PAUSE)
     {
+        if ((state == RECORD_ENGINE_ARMED) ||
+            (state == RECORD_ENGINE_RECORDING) ||
+            (state == RECORD_ENGINE_PAUSED))
+        {
+            record_engine_toggle_pause();
+        }
         return;
     }
-
-    if (state == WAV_RECORD_ENGINE_RECORDING)
+    if (action == RECORD_SCREEN_ACTION_STOP_SAVE)
     {
-        wav_record_engine_request_stop();
+        if ((state == RECORD_ENGINE_ARMED) || (state == RECORD_ENGINE_RECORDING) ||
+            (state == RECORD_ENGINE_PAUSED))
+        {
+            record_engine_request_stop();
+        }
+        else if ((state == RECORD_ENGINE_FINISHED) ||
+                 (state == RECORD_ENGINE_CANCELLED) ||
+                 (state == RECORD_ENGINE_ERROR) ||
+                 (state == RECORD_ENGINE_STOPPED))
+        {
+            browser_refresh();
+            app_enter_browser();
+        }
         return;
     }
-
-    if ((state == WAV_RECORD_ENGINE_FINISHED) ||
-        (state == WAV_RECORD_ENGINE_ERROR) ||
-        (state == WAV_RECORD_ENGINE_STOPPED))
+    if (action == RECORD_SCREEN_ACTION_CANCEL_BACK)
     {
-        browser_refresh();
-        app_enter_browser();
-    }
-}
-
-static void app_handle_menu_event(button_event_t event)
-{
-    menu_action_t action = menu_handle_event(event);
-
-    if (action == MENU_ACTION_BACK)
-    {
-        app_enter_browser();
+        if ((state == RECORD_ENGINE_ARMED) || (state == RECORD_ENGINE_RECORDING) ||
+            (state == RECORD_ENGINE_PAUSED) || (state == RECORD_ENGINE_FINALIZING) ||
+            (state == RECORD_ENGINE_ERROR))
+        {
+            /* Keep the cancellation/deletion confirmation on the RECORD screen. */
+            record_engine_cancel();
+            lcd_clear();
+        }
     }
 }
 
@@ -305,202 +234,107 @@ void setup()
 {
     sdcard_early_prepare_pins();
     sd_ok = sdcard_init();
-
     lcd_init();
     keypad_init();
     lcd_clear();
 
     keypad_calibration_t calibration;
     bool calibration_loaded = calibration_store_load_keypad(&calibration);
-
-    if (calibration_loaded && !keypad_calibration_is_valid(&calibration))
+    if (calibration_loaded && !keypad_calibration_is_valid(&calibration)) calibration_loaded = false;
+    if (!calibration_loaded || force_calibration_requested())
     {
-        calibration_loaded = false;
+        if (!run_keypad_calibration(&calibration)) keypad_get_default_calibration(&calibration);
     }
-
-    bool force_calibration = force_calibration_requested();
-
-    if (!calibration_loaded || force_calibration)
-    {
-        bool calibration_ok = run_keypad_calibration(&calibration);
-
-        if (!calibration_ok)
-        {
-            keypad_get_default_calibration(&calibration);
-            lcd_clear();
-            lcd_print_line(0, "USING DEFAULT");
-            lcd_print_line(1, "CALIBRATION");
-            delay(1500);
-        }
-    }
-
     keypad_set_calibration(&calibration);
 
     browser_init(sd_ok);
     menu_init();
+    record_menu_init();
     play_controller_init();
-    wav_record_engine_init();
+    record_engine_init();
     current_screen = APP_SCREEN_BROWSER;
-
     lcd_clear();
 }
 
 void loop()
 {
-    uint32_t now;
+    uint32_t now = millis();
 
-    /*
-        Realtime WAV foreground path. Timer1 ISR is the only fixed-rate work;
-        this loop gives SD refill as much CPU time as possible. The keypad and
-        LCD are deliberately rate-limited only while the PLAY screen is open.
-    */
-    if (current_screen == APP_SCREEN_PLAY_STUB)
+    if (current_screen == APP_SCREEN_PLAY)
     {
         play_controller_service();
-        now = millis();
-
-        if ((now - last_play_keypad_poll_ms) >= WAV_PLAY_KEYPAD_POLL_MS)
+        if ((now - last_active_keypad_poll_ms) >= ACTIVE_KEYPAD_POLL_MS)
         {
-            button_event_t event;
-
-            last_play_keypad_poll_ms = now;
-            event = keypad_get_event();
-
-            if (event != BUTTON_EVENT_NONE)
-            {
-                app_handle_play_stub_event(event);
-            }
+            last_active_keypad_poll_ms = now;
+            button_event_t event = keypad_get_event();
+            if (event != BUTTON_EVENT_NONE) app_handle_play_event(event);
         }
-
         play_controller_service();
-
-        if ((now - last_lcd_update_ms) >= WAV_PLAY_LCD_UPDATE_MS)
+        if ((now - last_lcd_update_ms) >= ACTIVE_LCD_UPDATE_MS)
         {
             play_controller_view_t view;
-
             last_lcd_update_ms = now;
             play_controller_get_view(&view);
             play_screen_render(&view);
         }
-
         play_controller_service();
         return;
     }
 
-    /*
-        RECORD uses a separate Timer1 sampler and a raw 1-bit FIFO. SD writes
-        happen only in foreground; run service before and after optional UI
-        work to keep the recording ring drained.
-    */
     if (current_screen == APP_SCREEN_RECORD)
     {
-        wav_record_engine_state_t record_state;
-
-        wav_record_engine_service();
-        now = millis();
-        record_state = wav_record_engine_get_state();
-
-        if ((record_state == WAV_RECORD_ENGINE_FINISHED) &&
-            (record_finished_since_ms == 0U))
+        record_engine_service();
+        if ((now - last_active_keypad_poll_ms) >= ACTIVE_KEYPAD_POLL_MS)
         {
-            record_finished_since_ms = now;
+            last_active_keypad_poll_ms = now;
+            button_event_t event = keypad_get_event();
+            if (event != BUTTON_EVENT_NONE) app_handle_record_event(event);
         }
-
-        if ((record_finished_since_ms != 0U) &&
-            ((now - record_finished_since_ms) >=
-             WAV_RECORD_FINISHED_HOLD_MS))
-        {
-            browser_refresh();
-            app_enter_browser();
-            return;
-        }
-
-        if ((now - last_record_keypad_poll_ms) >=
-            WAV_RECORD_KEYPAD_POLL_MS)
-        {
-            button_event_t record_event;
-
-            last_record_keypad_poll_ms = now;
-            record_event = keypad_get_event();
-
-            if (record_event != BUTTON_EVENT_NONE)
-            {
-                app_handle_record_event(record_event);
-            }
-        }
-
-        wav_record_engine_service();
-
-        if ((now - last_lcd_update_ms) >= WAV_RECORD_LCD_UPDATE_MS)
+        record_engine_service();
+        if ((now - last_lcd_update_ms) >= ACTIVE_LCD_UPDATE_MS)
         {
             last_lcd_update_ms = now;
             record_screen_render();
         }
-
-        wav_record_engine_service();
+        record_engine_service();
         return;
     }
 
-    /* Original browser/menu behavior remains unchanged. */
+    browser_service();
     button_event_t event = keypad_get_event();
-
     if (event != BUTTON_EVENT_NONE)
     {
-        switch (current_screen)
+        if (current_screen == APP_SCREEN_BROWSER)
         {
-            case APP_SCREEN_BROWSER:
-                app_handle_browser_event(event);
-                break;
-
-            case APP_SCREEN_MENU:
-                app_handle_menu_event(event);
-                break;
-
-            default:
-                app_enter_browser();
-                break;
+            app_handle_browser_event(event);
+        }
+        else if (current_screen == APP_SCREEN_PLAY_MENU)
+        {
+            if (menu_handle_event(event) == MENU_ACTION_BACK) app_enter_browser();
+        }
+        else if (current_screen == APP_SCREEN_RECORD_MENU)
+        {
+            if (record_menu_handle_event(event) == RECORD_MENU_ACTION_BACK) app_enter_browser();
         }
     }
-
-    now = millis();
 
     if ((now - last_lcd_update_ms) >= 120U)
     {
         last_lcd_update_ms = now;
-
         switch (current_screen)
         {
-            case APP_SCREEN_BROWSER:
-                browser_render();
-                break;
-
-            case APP_SCREEN_PLAY_STUB:
+            case APP_SCREEN_BROWSER: browser_render(); break;
+            case APP_SCREEN_PLAY_MENU: menu_render(); break;
+            case APP_SCREEN_RECORD_MENU: record_menu_render(); break;
+            case APP_SCREEN_PLAY:
             {
-                /*
-                    The screen can change from BROWSER to PLAY while handling
-                    SELECT in this same loop iteration. Do not fall through to
-                    default and return to the browser. Render the new PLAY
-                    screen once; the dedicated PLAY branch at the top of the
-                    next loop handles realtime WAV service.
-                */
                 play_controller_view_t view;
-
                 play_controller_get_view(&view);
                 play_screen_render(&view);
                 break;
             }
-
-            case APP_SCREEN_RECORD:
-                record_screen_render();
-                break;
-
-            case APP_SCREEN_MENU:
-                menu_render();
-                break;
-
-            default:
-                app_enter_browser();
-                break;
+            case APP_SCREEN_RECORD: record_screen_render(); break;
+            default: app_enter_browser(); break;
         }
     }
 }

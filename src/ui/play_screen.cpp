@@ -8,28 +8,19 @@
 static void lcd_print_fixed(uint8_t row, const char *text)
 {
     char line[17];
-
     snprintf(line, sizeof(line), "%-16s", text != NULL ? text : "");
     lcd_set_cursor(0, row);
     lcd_print(line);
 }
 
-static const char* state_to_label(play_controller_state_t state)
+static const char *state_to_label(play_controller_state_t state)
 {
     switch (state)
     {
-        case PLAY_CONTROLLER_STATE_PLAYING:
-            return "PLY";
-
-        case PLAY_CONTROLLER_STATE_PAUSED:
-            return "PAU";
-
-        case PLAY_CONTROLLER_STATE_ERROR:
-            return "ERR";
-
-        case PLAY_CONTROLLER_STATE_READY:
-        default:
-            return "RDY";
+        case PLAY_CONTROLLER_STATE_PLAYING: return "PLY";
+        case PLAY_CONTROLLER_STATE_PAUSED: return "PAU";
+        case PLAY_CONTROLLER_STATE_ERROR: return "ERR";
+        default: return "RDY";
     }
 }
 
@@ -37,24 +28,16 @@ play_screen_action_t play_screen_handle_event(button_event_t event)
 {
     switch (event)
     {
-        case BUTTON_EVENT_SELECT_SHORT:
-            return PLAY_SCREEN_ACTION_TOGGLE_PLAY;
-
+        case BUTTON_EVENT_SELECT_SHORT: return PLAY_SCREEN_ACTION_TOGGLE_PLAY;
         case BUTTON_EVENT_LEFT_SHORT:
-        case BUTTON_EVENT_LEFT_LONG:
-            return PLAY_SCREEN_ACTION_BACK;
-
-        default:
-            break;
+        case BUTTON_EVENT_LEFT_LONG: return PLAY_SCREEN_ACTION_BACK;
+        default: return PLAY_SCREEN_ACTION_NONE;
     }
-
-    return PLAY_SCREEN_ACTION_NONE;
 }
 
 void play_screen_render(const play_controller_view_t *view)
 {
     char line1[17];
-
     if (view == NULL)
     {
         lcd_print_fixed(0, "PLAY");
@@ -63,46 +46,25 @@ void play_screen_render(const play_controller_view_t *view)
     }
 
     lcd_print_fixed(0, view->filename);
-
-    if (view->format == FILE_FORMAT_UNKNOWN)
+    if (view->state == PLAY_CONTROLLER_STATE_ERROR)
+    {
+        snprintf(line1, sizeof(line1), "ERR %.12s", view->error_text != NULL ? view->error_text : "UNKNOWN");
+    }
+    else if (view->format == FILE_FORMAT_UNKNOWN)
     {
         snprintf(line1, sizeof(line1), "UNSUPPORTED");
     }
-    else if (view->state == PLAY_CONTROLLER_STATE_ERROR)
+    else if (view->waiting_for_motor)
     {
-        snprintf(line1, sizeof(line1), "ERR %-12s",
-                 (view->error_text != NULL && view->error_text[0] != '\0') ?
-                     view->error_text : "UNKNOWN");
+        snprintf(line1, sizeof(line1), "WAIT MOTOR B%03u",
+                 (unsigned int)view->buffer_fill_percent);
     }
-    else if ((view->format == FILE_FORMAT_WAV) &&
-             ((view->state == PLAY_CONTROLLER_STATE_PLAYING) ||
-              (view->state == PLAY_CONTROLLER_STATE_PAUSED)))
+    else
     {
-        /*
-            B is prepared FIFO fill. It is the immediate diagnostic for SD
-            refill health. Jitter is measured electrically: D11 (Timer1 OC1A)
-            is a hardware timing marker and D2 is READ.
-        */
-        snprintf(line1, sizeof(line1), "%s %03u%% B%02u",
+        snprintf(line1, sizeof(line1), "%s %03u%% B%03u",
                  state_to_label(view->state),
                  (unsigned int)view->progress_percent,
                  (unsigned int)view->buffer_fill_percent);
     }
-    else if ((view->format == FILE_FORMAT_WAV) &&
-             (view->timing_marker_pin != 0U))
-    {
-        snprintf(line1, sizeof(line1), "%s WAV P%02u T%02u",
-                 state_to_label(view->state),
-                 (unsigned int)view->output_pin,
-                 (unsigned int)view->timing_marker_pin);
-    }
-    else
-    {
-        snprintf(line1, sizeof(line1), "%s %s P%02u",
-                 state_to_label(view->state),
-                 file_format_to_label(view->format),
-                 (unsigned int)view->output_pin);
-    }
-
     lcd_print_fixed(1, line1);
 }

@@ -22,6 +22,9 @@ typedef struct
     file_format_t format;
     menu_play_mode_t play_mode;
     bool invert_signal;
+    play_control_mode_t control_mode;
+    bool waiting_for_motor;
+    bool manual_override;
 
     play_controller_state_t state;
     const char *error_text;
@@ -51,7 +54,8 @@ void play_controller_init(void);
 void play_controller_start_session(const char *filename,
                                    const char *full_path,
                                    menu_play_mode_t play_mode,
-                                   bool invert_signal);
+                                   bool invert_signal,
+                                   play_control_mode_t control_mode);
 void play_controller_toggle_play_pause(void);
 void play_controller_stop(void);
 
@@ -64,4 +68,5 @@ const char* play_controller_get_full_path(void);
 file_format_t play_controller_get_format(void);
 menu_play_mode_t play_controller_get_play_mode(void);
 bool play_controller_get_invert_signal(void);
+play_control_mode_t play_controller_get_control_mode(void);
 play_controller_state_t play_controller_get_state(void);

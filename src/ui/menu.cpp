@@ -8,63 +8,34 @@ typedef enum
 {
     MENU_ITEM_PLAY_MODE = 0,
     MENU_ITEM_INVERT_SIGNAL,
-    MENU_ITEM_RECORD_RATE,
+    MENU_ITEM_PLAY_CONTROL,
     MENU_ITEM_COUNT
 } menu_item_t;
 
 static menu_item_t selected_item = MENU_ITEM_PLAY_MODE;
 static menu_play_mode_t play_mode = MENU_PLAY_MODE_NORMAL;
 static bool invert_signal = false;
-static uint32_t record_sample_rate = 22050UL;
+static play_control_mode_t play_control_mode = PLAY_CONTROL_MOTOR;
 
 static void lcd_print_fixed(uint8_t row, const char *text)
 {
     char line[17];
-
     snprintf(line, sizeof(line), "%-16s", text != NULL ? text : "");
     lcd_set_cursor(0, row);
     lcd_print(line);
 }
 
-static void menu_move_up(void)
+const char *play_control_mode_label(play_control_mode_t mode)
 {
-    if (selected_item == MENU_ITEM_PLAY_MODE)
-    {
-        selected_item = (menu_item_t)(MENU_ITEM_COUNT - 1);
-    }
-    else
-    {
-        selected_item = (menu_item_t)((int)selected_item - 1);
-    }
+    return (mode == PLAY_CONTROL_MANUAL) ? "MANUAL" : "MOTOR";
 }
 
-static void menu_move_down(void)
+static void move_selection(int8_t direction)
 {
-    selected_item = (menu_item_t)(((int)selected_item + 1) %
-                                  (int)MENU_ITEM_COUNT);
-}
-
-static void menu_toggle_current(void)
-{
-    switch (selected_item)
-    {
-        case MENU_ITEM_PLAY_MODE:
-            play_mode = (play_mode == MENU_PLAY_MODE_NORMAL) ?
-                MENU_PLAY_MODE_ULTRA_TURBO : MENU_PLAY_MODE_NORMAL;
-            break;
-
-        case MENU_ITEM_INVERT_SIGNAL:
-            invert_signal = !invert_signal;
-            break;
-
-        case MENU_ITEM_RECORD_RATE:
-            record_sample_rate = (record_sample_rate == 22050UL) ?
-                44100UL : 22050UL;
-            break;
-
-        default:
-            break;
-    }
+    int8_t next = (int8_t)selected_item + direction;
+    if (next < 0) next = (int8_t)MENU_ITEM_COUNT - 1;
+    if (next >= (int8_t)MENU_ITEM_COUNT) next = 0;
+    selected_item = (menu_item_t)next;
 }
 
 void menu_init(void)
@@ -72,7 +43,7 @@ void menu_init(void)
     selected_item = MENU_ITEM_PLAY_MODE;
     play_mode = MENU_PLAY_MODE_NORMAL;
     invert_signal = false;
-    record_sample_rate = 22050UL;
+    play_control_mode = PLAY_CONTROL_MOTOR;
 }
 
 menu_action_t menu_handle_event(button_event_t event)
@@ -81,17 +52,30 @@ menu_action_t menu_handle_event(button_event_t event)
     {
         case BUTTON_EVENT_UP_PRESS:
         case BUTTON_EVENT_UP_REPEAT:
-            menu_move_up();
-            return MENU_ACTION_NONE;
+            move_selection(-1);
+            break;
 
         case BUTTON_EVENT_DOWN_PRESS:
         case BUTTON_EVENT_DOWN_REPEAT:
-            menu_move_down();
-            return MENU_ACTION_NONE;
+            move_selection(1);
+            break;
 
         case BUTTON_EVENT_SELECT_SHORT:
-            menu_toggle_current();
-            return MENU_ACTION_NONE;
+            if (selected_item == MENU_ITEM_PLAY_MODE)
+            {
+                play_mode = (play_mode == MENU_PLAY_MODE_NORMAL) ?
+                    MENU_PLAY_MODE_ULTRA_TURBO : MENU_PLAY_MODE_NORMAL;
+            }
+            else if (selected_item == MENU_ITEM_INVERT_SIGNAL)
+            {
+                invert_signal = !invert_signal;
+            }
+            else
+            {
+                play_control_mode = (play_control_mode == PLAY_CONTROL_MOTOR) ?
+                    PLAY_CONTROL_MANUAL : PLAY_CONTROL_MOTOR;
+            }
+            break;
 
         case BUTTON_EVENT_LEFT_SHORT:
         case BUTTON_EVENT_LEFT_LONG:
@@ -100,7 +84,6 @@ menu_action_t menu_handle_event(button_event_t event)
         default:
             break;
     }
-
     return MENU_ACTION_NONE;
 }
 
@@ -119,35 +102,15 @@ void menu_render(void)
             lcd_print_fixed(1, invert_signal ? " ON" : " OFF");
             break;
 
-        case MENU_ITEM_RECORD_RATE:
-        {
-            char line[17];
-
-            lcd_print_fixed(0, ">REC SAMPLE RATE");
-            snprintf(line, sizeof(line), " %5lu Hz",
-                     (unsigned long)record_sample_rate);
-            lcd_print_fixed(1, line);
-            break;
-        }
-
+        case MENU_ITEM_PLAY_CONTROL:
         default:
-            lcd_print_fixed(0, ">MENU");
-            lcd_print_fixed(1, " ERROR");
+            lcd_print_fixed(0, ">PLAY CTRL");
+            lcd_print_fixed(1, play_control_mode == PLAY_CONTROL_MANUAL ?
+                            " MANUAL" : " MOTOR");
             break;
     }
 }
 
-menu_play_mode_t menu_get_play_mode(void)
-{
-    return play_mode;
-}
-
-bool menu_get_invert_signal(void)
-{
-    return invert_signal;
-}
-
-uint32_t menu_get_record_sample_rate(void)
-{
-    return record_sample_rate;
-}
+menu_play_mode_t menu_get_play_mode(void) { return play_mode; }
+bool menu_get_invert_signal(void) { return invert_signal; }
+play_control_mode_t menu_get_play_control_mode(void) { return play_control_mode; }

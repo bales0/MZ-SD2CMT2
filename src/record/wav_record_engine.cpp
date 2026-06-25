@@ -204,61 +204,36 @@ static bool wav_record_expand_and_write(uint16_t raw_count)
     return true;
 }
 
-/*
-    Realtime phase: write at most one PCM sector per service call and only
-    after SdFat says the card is no longer programming its previous sector.
-    RingBufLogger from SdFat uses the same rule: one sector after !isBusy().
-    This avoids a long busy wait while Timer1 continues sampling D15.
-*/
-static bool wav_record_drain_one_sector_if_ready(void)
+static bool wav_record_drain_one_block_if_ready(bool allow_partial)
 {
+    uint16_t available = record_sample_stream_available_bytes();
+    uint16_t request;
     uint16_t got;
 
-    if (record_sample_stream_available_bytes() < WAV_RECORD_RAW_BLOCK_BYTES)
+    if (available == 0U)
     {
         return true;
     }
-
+    if (!allow_partial && (available < WAV_RECORD_RAW_BLOCK_BYTES))
+    {
+        return true;
+    }
     if (sdcard_file_is_busy())
     {
         return true;
     }
 
-    got = record_sample_stream_pop_bytes(
-        wav_record_work_block,
-        WAV_RECORD_RAW_BLOCK_BYTES
-    );
-
-    if (got != WAV_RECORD_RAW_BLOCK_BYTES)
+    request = available;
+    if (request > WAV_RECORD_RAW_BLOCK_BYTES)
     {
-        wav_record_set_error("REC FIFO RACE");
+        request = WAV_RECORD_RAW_BLOCK_BYTES;
+    }
+
+    got = record_sample_stream_pop_bytes(wav_record_work_block, request);
+    if ((got == 0U) || !wav_record_expand_and_write(got))
+    {
         return false;
     }
-
-    return wav_record_expand_and_write(got);
-}
-
-static bool wav_record_drain_remaining_bytes(void)
-{
-    while (record_sample_stream_available_bytes() != 0U)
-    {
-        uint16_t available = record_sample_stream_available_bytes();
-        uint16_t request = available;
-        uint16_t got;
-
-        if (request > WAV_RECORD_RAW_BLOCK_BYTES)
-        {
-            request = WAV_RECORD_RAW_BLOCK_BYTES;
-        }
-
-        got = record_sample_stream_pop_bytes(wav_record_work_block, request);
-
-        if ((got == 0U) || !wav_record_expand_and_write(got))
-        {
-            return false;
-        }
-    }
-
     return true;
 }
 
@@ -344,6 +319,12 @@ void wav_record_engine_init(void)
     final_tail_taken = false;
 }
 
+bool wav_record_engine_preview_filename(const char *directory_path)
+{
+    /* This only scans for the next free name. It does not create/open a file. */
+    return wav_record_make_paths(directory_path);
+}
+
 bool wav_record_engine_start(const char *directory_path,
                              uint32_t sample_rate)
 {
@@ -411,9 +392,43 @@ bool wav_record_engine_start(const char *directory_path,
     return true;
 }
 
+bool wav_record_engine_pause(void)
+{
+    if ((record_state == WAV_RECORD_ENGINE_RECORDING) && wav_record_driver_pause())
+    {
+        record_state = WAV_RECORD_ENGINE_PAUSED;
+        return true;
+    }
+    return false;
+}
+
+bool wav_record_engine_resume(void)
+{
+    if ((record_state == WAV_RECORD_ENGINE_PAUSED) && wav_record_driver_resume())
+    {
+        record_state = WAV_RECORD_ENGINE_RECORDING;
+        return true;
+    }
+    return false;
+}
+
+void wav_record_engine_cancel(void)
+{
+    wav_record_driver_stop();
+    sdcard_file_close();
+    if (record_full_path[0] != '\0')
+    {
+        (void)sdcard_file_remove(record_full_path);
+    }
+    record_state = WAV_RECORD_ENGINE_STOPPED;
+    data_bytes_written = 0UL;
+    final_tail_taken = false;
+}
+
 void wav_record_engine_request_stop(void)
 {
-    if (record_state != WAV_RECORD_ENGINE_RECORDING)
+    if ((record_state != WAV_RECORD_ENGINE_RECORDING) &&
+        (record_state != WAV_RECORD_ENGINE_PAUSED))
     {
         return;
     }
@@ -424,7 +439,8 @@ void wav_record_engine_request_stop(void)
 
 void wav_record_engine_service(void)
 {
-    if (record_state == WAV_RECORD_ENGINE_RECORDING)
+    if ((record_state == WAV_RECORD_ENGINE_RECORDING) ||
+        (record_state == WAV_RECORD_ENGINE_PAUSED))
     {
         if (wav_record_driver_get_state() == WAV_RECORD_DRIVER_OVERRUN)
         {
@@ -432,7 +448,7 @@ void wav_record_engine_service(void)
             return;
         }
 
-        if (!wav_record_drain_one_sector_if_ready())
+        if (!wav_record_drain_one_block_if_ready(false))
         {
             wav_record_stop_close_error(record_error_text);
         }
@@ -442,9 +458,35 @@ void wav_record_engine_service(void)
 
     if (record_state == WAV_RECORD_ENGINE_FINALIZING)
     {
-        if (!wav_record_drain_remaining_bytes() ||
-            !wav_record_write_final_tail() ||
-            !wav_record_finalize_file())
+        /* Never drain an arbitrary number of blocks or wait for SD busy here.
+           One foreground service pass performs at most one data write. */
+        if (record_sample_stream_available_bytes() != 0U)
+        {
+            if (!wav_record_drain_one_block_if_ready(true))
+            {
+                wav_record_stop_close_error(record_error_text);
+            }
+            return;
+        }
+
+        if (!final_tail_taken)
+        {
+            if (sdcard_file_is_busy())
+            {
+                return;
+            }
+            if (!wav_record_write_final_tail())
+            {
+                wav_record_stop_close_error(record_error_text);
+            }
+            return;
+        }
+
+        if (sdcard_file_is_busy())
+        {
+            return;
+        }
+        if (!wav_record_finalize_file())
         {
             wav_record_stop_close_error(record_error_text);
         }
@@ -480,7 +522,8 @@ uint32_t wav_record_engine_get_captured_samples(void)
 {
     uint32_t samples = data_bytes_written;
 
-    if (record_state == WAV_RECORD_ENGINE_RECORDING)
+    if ((record_state == WAV_RECORD_ENGINE_RECORDING) ||
+        (record_state == WAV_RECORD_ENGINE_PAUSED))
     {
         samples += (uint32_t)record_sample_stream_available_bytes() * 8UL;
         samples += (uint32_t)wav_record_driver_get_pending_sample_count();
