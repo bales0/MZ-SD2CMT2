@@ -113,11 +113,11 @@ static void sdcard_send_idle_clocks(void)
     SPI.endTransaction();
 }
 
-bool sdcard_init(void)
+static bool sdcard_initialize(bool force_reinitialize)
 {
     sdcard_early_prepare_pins();
 
-    if (sdcard_mounted && sdcard_probe_present())
+    if (!force_reinitialize && sdcard_mounted && sdcard_probe_present())
     {
         sdcard_error = "OK";
         sdcard_error_code = 0;
@@ -155,6 +155,16 @@ bool sdcard_init(void)
     sdcard_error_code = 0;
     sdcard_error_data = 0;
     return true;
+}
+
+bool sdcard_init(void)
+{
+    return sdcard_initialize(false);
+}
+
+bool sdcard_reinitialize(void)
+{
+    return sdcard_initialize(true);
 }
 
 bool sdcard_is_mounted(void)
@@ -268,6 +278,7 @@ bool sdcard_read_entry_by_index(const char *path, uint16_t index, sdcard_entry_t
             entry->name[sizeof(entry->name) - 1] = '\0';
             entry->is_dir = file.isDir();
             entry->size = file.fileSize();
+            entry->source_index = current_index;
             file.close();
             dir.close();
 
@@ -298,6 +309,471 @@ bool sdcard_read_entry_by_index(const char *path, uint16_t index, sdcard_entry_t
     entry->size = 0;
     sdcard_error = "NO ENTRY";
     return false;
+}
+
+/*
+    Browser sorting deliberately uses repeated directory scans instead of a RAM
+    table. A 999-entry table plus names would exceed the practical SRAM budget
+    of Mega 2560 while recording can also borrow browser scratch memory.
+*/
+static void sdcard_copy_entry_from_file(FsFile *file,
+                                        uint16_t source_index,
+                                        sdcard_entry_t *entry)
+{
+    memset(entry, 0, sizeof(sdcard_entry_t));
+    file->getName(entry->name, sizeof(entry->name));
+    entry->name[sizeof(entry->name) - 1U] = '\0';
+    entry->is_dir = file->isDir();
+    entry->size = file->fileSize();
+    entry->source_index = source_index;
+}
+
+static char sdcard_ascii_upper(char value)
+{
+    if ((value >= 'a') && (value <= 'z'))
+    {
+        return (char)(value - ('a' - 'A'));
+    }
+    return value;
+}
+
+static int8_t sdcard_compare_entry_names(const char *left, const char *right)
+{
+    while ((*left != '\0') && (*right != '\0'))
+    {
+        uint8_t left_character = (uint8_t)sdcard_ascii_upper(*left);
+        uint8_t right_character = (uint8_t)sdcard_ascii_upper(*right);
+
+        if (left_character < right_character)
+        {
+            return -1;
+        }
+        if (left_character > right_character)
+        {
+            return 1;
+        }
+
+        left++;
+        right++;
+    }
+
+    if (*left != '\0')
+    {
+        return 1;
+    }
+    if (*right != '\0')
+    {
+        return -1;
+    }
+    return 0;
+}
+
+static int8_t sdcard_compare_entries(const sdcard_entry_t *left,
+                                     const sdcard_entry_t *right)
+{
+    int8_t name_relation;
+
+    if (left->is_dir && !right->is_dir)
+    {
+        return -1;
+    }
+    if (!left->is_dir && right->is_dir)
+    {
+        return 1;
+    }
+
+    name_relation = sdcard_compare_entry_names(left->name, right->name);
+    if (name_relation != 0)
+    {
+        return name_relation;
+    }
+
+    /* FAT permits combinations such as a long-file name and an 8.3 alias
+       that compare equal here. Keep the browser order total and stable. */
+    if (left->source_index < right->source_index)
+    {
+        return -1;
+    }
+    if (left->source_index > right->source_index)
+    {
+        return 1;
+    }
+    return 0;
+}
+
+static bool sdcard_open_directory_for_browser(const char *path, FsFile *directory)
+{
+    if (path == NULL)
+    {
+        sdcard_error = "BAD PATH";
+        return false;
+    }
+    if (directory == NULL)
+    {
+        sdcard_error = "BAD ARG";
+        return false;
+    }
+    if (!sdcard_probe_present())
+    {
+        return false;
+    }
+    if (!directory->open(path))
+    {
+        if (!sdcard_probe_present())
+        {
+            return false;
+        }
+        sdcard_error = "DIR FAIL";
+        return false;
+    }
+    if (!directory->isDir())
+    {
+        directory->close();
+        sdcard_error = "NOT DIR";
+        return false;
+    }
+    return true;
+}
+
+static bool sdcard_finish_browser_directory_read(FsFile *directory)
+{
+    if ((directory != NULL) && directory->isOpen())
+    {
+        directory->close();
+    }
+    return sdcard_probe_present();
+}
+
+bool sdcard_scan_directory_first_sorted(const char *path,
+                                        uint16_t max_entries,
+                                        uint16_t *entry_count,
+                                        sdcard_entry_t *first_entry)
+{
+    FsFile directory;
+    FsFile file;
+    sdcard_entry_t candidate;
+    bool have_candidate = false;
+    uint16_t count = 0U;
+
+    if ((entry_count == NULL) || (first_entry == NULL))
+    {
+        sdcard_error = "BAD ARG";
+        return false;
+    }
+
+    *entry_count = 0U;
+    memset(first_entry, 0, sizeof(sdcard_entry_t));
+
+    if (!sdcard_open_directory_for_browser(path, &directory))
+    {
+        return false;
+    }
+
+    while (file.openNext(&directory, O_RDONLY))
+    {
+        sdcard_entry_t current;
+
+        if ((max_entries != 0U) && (count >= max_entries))
+        {
+            file.close();
+            break;
+        }
+
+        sdcard_copy_entry_from_file(&file, count, &current);
+        count++;
+
+        if (!have_candidate || (sdcard_compare_entries(&current, &candidate) < 0))
+        {
+            candidate = current;
+            have_candidate = true;
+        }
+
+        file.close();
+    }
+
+    if (!sdcard_finish_browser_directory_read(&directory))
+    {
+        return false;
+    }
+
+    *entry_count = count;
+    if (have_candidate)
+    {
+        *first_entry = candidate;
+    }
+
+    sdcard_error = "OK";
+    return true;
+}
+
+static bool sdcard_read_sorted_extreme(const char *path,
+                                       uint16_t max_entries,
+                                       bool want_last,
+                                       sdcard_entry_t *entry)
+{
+    uint8_t attempt;
+
+    if (entry == NULL)
+    {
+        sdcard_error = "BAD ARG";
+        return false;
+    }
+    memset(entry, 0, sizeof(sdcard_entry_t));
+
+    /* The initial directory access after SD power-up can occasionally finish
+       before the first openNext() produces an item on some cards. Retry one
+       completely closed scan. This does not use extra SRAM and only runs when
+       the first scan was empty, not during normal successful navigation. */
+    for (attempt = 0U; attempt < 2U; ++attempt)
+    {
+        FsFile directory;
+        FsFile file;
+        sdcard_entry_t candidate;
+        bool have_candidate = false;
+        uint16_t visited = 0U;
+
+        if (!sdcard_open_directory_for_browser(path, &directory))
+        {
+            return false;
+        }
+
+        while (file.openNext(&directory, O_RDONLY))
+        {
+            sdcard_entry_t current;
+
+            if ((max_entries != 0U) && (visited >= max_entries))
+            {
+                file.close();
+                break;
+            }
+            sdcard_copy_entry_from_file(&file, visited, &current);
+            visited++;
+            if (!have_candidate ||
+                ((want_last && (sdcard_compare_entries(&current, &candidate) > 0)) ||
+                 (!want_last && (sdcard_compare_entries(&current, &candidate) < 0))))
+            {
+                candidate = current;
+                have_candidate = true;
+            }
+            file.close();
+        }
+
+        if (!sdcard_finish_browser_directory_read(&directory))
+        {
+            return false;
+        }
+        if (have_candidate)
+        {
+            *entry = candidate;
+            sdcard_error = "OK";
+            return true;
+        }
+
+        if (attempt == 0U)
+        {
+            delay(10U);
+        }
+    }
+
+    sdcard_error = "NO ENTRY";
+    return false;
+}
+
+bool sdcard_read_first_sorted_entry(const char *path,
+                                     uint16_t max_entries,
+                                     sdcard_entry_t *entry)
+{
+    uint16_t count = 0U;
+
+    if (!sdcard_scan_directory_first_sorted(path, max_entries, &count, entry))
+    {
+        return false;
+    }
+
+    if (count == 0U)
+    {
+        sdcard_error = "NO ENTRY";
+        return false;
+    }
+
+    return true;
+}
+
+bool sdcard_read_last_sorted_entry(const char *path,
+                                    uint16_t max_entries,
+                                    sdcard_entry_t *entry)
+{
+    return sdcard_read_sorted_extreme(path, max_entries, true, entry);
+}
+
+bool sdcard_read_sorted_neighbor(const char *path,
+                                 uint16_t max_entries,
+                                 const sdcard_entry_t *reference,
+                                 bool previous,
+                                 sdcard_entry_t *entry)
+{
+    FsFile directory;
+    FsFile file;
+    sdcard_entry_t reference_copy;
+    sdcard_entry_t candidate;
+    bool have_candidate = false;
+    uint16_t visited = 0U;
+
+    if ((reference == NULL) || (entry == NULL))
+    {
+        sdcard_error = "BAD ARG";
+        return false;
+    }
+    reference_copy = *reference;
+    memset(entry, 0, sizeof(sdcard_entry_t));
+
+    if (!sdcard_open_directory_for_browser(path, &directory))
+    {
+        return false;
+    }
+
+    while (file.openNext(&directory, O_RDONLY))
+    {
+        sdcard_entry_t current;
+        int8_t relation;
+
+        if ((max_entries != 0U) && (visited >= max_entries))
+        {
+            file.close();
+            break;
+        }
+        sdcard_copy_entry_from_file(&file, visited, &current);
+        visited++;
+        relation = sdcard_compare_entries(&current, &reference_copy);
+
+        if (previous)
+        {
+            if ((relation < 0) &&
+                (!have_candidate || (sdcard_compare_entries(&current, &candidate) > 0)))
+            {
+                candidate = current;
+                have_candidate = true;
+            }
+        }
+        else
+        {
+            if ((relation > 0) &&
+                (!have_candidate || (sdcard_compare_entries(&current, &candidate) < 0)))
+            {
+                candidate = current;
+                have_candidate = true;
+            }
+        }
+
+        file.close();
+    }
+
+    if (!sdcard_finish_browser_directory_read(&directory))
+    {
+        return false;
+    }
+    if (!have_candidate)
+    {
+        sdcard_error = "NO ENTRY";
+        return false;
+    }
+
+    *entry = candidate;
+    sdcard_error = "OK";
+    return true;
+}
+
+bool sdcard_find_sorted_entry_by_identity(const char *path,
+                                          uint16_t max_entries,
+                                          const char *name,
+                                          bool is_dir,
+                                          uint16_t *sorted_index,
+                                          sdcard_entry_t *entry)
+{
+    FsFile directory;
+    FsFile file;
+    sdcard_entry_t matching_entry;
+    uint16_t visited = 0U;
+    uint16_t rank = 0U;
+    bool found = false;
+
+    if ((name == NULL) || (sorted_index == NULL) || (entry == NULL))
+    {
+        sdcard_error = "BAD ARG";
+        return false;
+    }
+
+    if (!sdcard_open_directory_for_browser(path, &directory))
+    {
+        return false;
+    }
+
+    /* First matching physical entry is intentionally selected if identical
+       names exist. Its source_index then makes the following sort rank unique. */
+    while (file.openNext(&directory, O_RDONLY))
+    {
+        sdcard_entry_t current;
+
+        if ((max_entries != 0U) && (visited >= max_entries))
+        {
+            file.close();
+            break;
+        }
+        sdcard_copy_entry_from_file(&file, visited, &current);
+        visited++;
+
+        if (!found && (current.is_dir == is_dir) && (strcmp(current.name, name) == 0))
+        {
+            matching_entry = current;
+            found = true;
+        }
+        file.close();
+    }
+
+    if (!sdcard_finish_browser_directory_read(&directory))
+    {
+        return false;
+    }
+    if (!found)
+    {
+        sdcard_error = "NO ENTRY";
+        return false;
+    }
+
+    if (!sdcard_open_directory_for_browser(path, &directory))
+    {
+        return false;
+    }
+
+    visited = 0U;
+    while (file.openNext(&directory, O_RDONLY))
+    {
+        sdcard_entry_t current;
+
+        if ((max_entries != 0U) && (visited >= max_entries))
+        {
+            file.close();
+            break;
+        }
+        sdcard_copy_entry_from_file(&file, visited, &current);
+        visited++;
+
+        if (sdcard_compare_entries(&current, &matching_entry) < 0)
+        {
+            rank++;
+        }
+        file.close();
+    }
+
+    if (!sdcard_finish_browser_directory_read(&directory))
+    {
+        return false;
+    }
+
+    *sorted_index = rank;
+    *entry = matching_entry;
+    sdcard_error = "OK";
+    return true;
 }
 
 bool sdcard_file_open_read(const char *path)
@@ -372,15 +848,6 @@ bool sdcard_file_exists(const char *path)
     }
 
     return sd.exists(path);
-}
-
-static char sdcard_ascii_upper(char value)
-{
-    if ((value >= 'a') && (value <= 'z'))
-    {
-        return (char)(value - ('a' - 'A'));
-    }
-    return value;
 }
 
 static bool sdcard_parse_record_sequence(const char *name, uint16_t *sequence)

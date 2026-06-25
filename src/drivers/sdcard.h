@@ -10,17 +10,61 @@ typedef struct
     bool is_dir;
     uint32_t size;
 
+    /* Physical order in the directory scan. It is only a stable tie-breaker
+       when two entries compare equal by name and type. */
+    uint16_t source_index;
+
 } sdcard_entry_t;
 
 void sdcard_early_prepare_pins(void);
 
 bool sdcard_init(void);
 
+/* Force a full SdFat/SPI initialization even if the card was mounted before.
+   Used after card insertion/retry before the browser reopens root. */
+bool sdcard_reinitialize(void);
+
 bool sdcard_is_mounted(void);
 
 uint16_t sdcard_count_entries(const char *path, uint16_t max_entries);
 
 bool sdcard_read_entry_by_index(const char *path, uint16_t index, sdcard_entry_t *entry);
+
+/*
+    Single-pass browser bootstrap: opens path once, counts up to max_entries and
+    returns the first alphabetical item from that same directory scan.  An empty
+    directory is successful with *entry_count == 0 and an empty *first_entry.
+    This avoids opening root once for counting and again for selection directly
+    after SD-card initialization.
+*/
+bool sdcard_scan_directory_first_sorted(const char *path,
+                                        uint16_t max_entries,
+                                        uint16_t *entry_count,
+                                        sdcard_entry_t *first_entry);
+
+/*
+    Memory-efficient alphabetical directory access for the browser.
+    Directories sort before files; names compare case-insensitively for ASCII.
+    These functions scan the directory and do not allocate a directory-name list
+    in SRAM, which keeps them safe for Mega 2560 recording modes.
+*/
+bool sdcard_read_first_sorted_entry(const char *path,
+                                     uint16_t max_entries,
+                                     sdcard_entry_t *entry);
+bool sdcard_read_last_sorted_entry(const char *path,
+                                    uint16_t max_entries,
+                                    sdcard_entry_t *entry);
+bool sdcard_read_sorted_neighbor(const char *path,
+                                 uint16_t max_entries,
+                                 const sdcard_entry_t *reference,
+                                 bool previous,
+                                 sdcard_entry_t *entry);
+bool sdcard_find_sorted_entry_by_identity(const char *path,
+                                          uint16_t max_entries,
+                                          const char *name,
+                                          bool is_dir,
+                                          uint16_t *sorted_index,
+                                          sdcard_entry_t *entry);
 
 uint16_t sdcard_count_root_entries(uint16_t max_entries);
 
