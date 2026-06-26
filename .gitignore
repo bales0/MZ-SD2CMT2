@@ -1,5 +1,5 @@
-.pio
-.vscode
-generated
+.pio/
+.vscode/
+generated/
 .gitignore
 platformio.exe
