@@ -5,7 +5,6 @@
 #include <stdint.h>
 
 #include "../formats/file_format.h"
-#include "../ui/menu.h"
 
 typedef enum
 {
@@ -16,21 +15,12 @@ typedef enum
     MZF_PLAYBACK_FINISHED,
     MZF_PLAYBACK_UNDERRUN,
     MZF_PLAYBACK_IO_ERROR,
-    MZF_PLAYBACK_BAD_FILE,
-    MZF_PLAYBACK_ULTRA_ERROR
+    MZF_PLAYBACK_BAD_FILE
 } mzf_playback_state_t;
 
-/*
-    Streams Sharp binary tape images without expanding them in SRAM.
-    NORMAL emits the monitor-compatible PWM tape framing. ULTRA FAST injects
-    the compatible loader used by the original MZ-SD2CMT project, then sends
-    the original payload through READ/WRITE/SENSE handshaking.
-*/
+/* Streams MZF/MZT/M12 with native MZ-800 monitor PWM framing only. */
 void mzf_playback_init(void);
-/* MZF/MZT/M12 use fixed native Sharp polarity; no invert argument. */
-bool mzf_playback_prepare(const char *path,
-                          file_format_t format,
-                          menu_play_mode_t play_mode);
+bool mzf_playback_prepare(const char *path, file_format_t format);
 bool mzf_playback_start(void);
 bool mzf_playback_pause(void);
 bool mzf_playback_resume(void);
@@ -40,11 +30,11 @@ void mzf_playback_service(void);
 mzf_playback_state_t mzf_playback_get_state(void);
 const char *mzf_playback_get_error_text(void);
 uint8_t mzf_playback_get_buffer_fill_percent(void);
-uint32_t mzf_playback_get_consumed_bytes(void);
-uint32_t mzf_playback_get_total_bytes(void);
 
-/* Internal Timer3 compare-B dispatch hook. Called only from ISR context.
-   Returns true when NORMAL MZF/MZT transport consumed the compare event. */
+/* Nominal monitor PWM duration, excluding MOTOR pause gaps between blocks. */
+uint32_t mzf_playback_get_total_duration_ms(void);
+
+/* Internal Timer3 compare-B dispatch hook, called only when MZF owns Timer3B. */
 bool mzf_playback_timer3_compb_from_isr(void);
 
 #endif

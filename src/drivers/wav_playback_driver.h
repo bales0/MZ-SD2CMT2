@@ -46,8 +46,6 @@ wav_playback_driver_state_t wav_playback_driver_get_state(void);
 uint32_t wav_playback_driver_get_sample_rate(void);
 uint8_t wav_playback_driver_get_read_pin(void);
 
-/* Monotonic 16-bit count of output samples. */
-uint16_t wav_playback_driver_get_emitted_sequence(void);
 
 /* No ISR-latency measurement is performed in this reliability version. */
 uint16_t wav_playback_driver_get_jitter_ticks(void);

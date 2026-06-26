@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <avr/pgmspace.h>
 
 typedef enum
 {
@@ -62,6 +63,6 @@ const wav_reader_info_t *wav_reader_get_info(void);
 
 wav_reader_status_t wav_reader_last_status(void);
 
-const char *wav_reader_status_text(wav_reader_status_t status);
+PGM_P wav_reader_status_text_P(wav_reader_status_t status);
 
 #endif

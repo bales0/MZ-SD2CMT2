@@ -7,14 +7,19 @@
 #include "edge_record_engine.h"
 #include "../drivers/mzio.h"
 #include "../drivers/write_edge_monitor.h"
+#include "../drivers/flash_text.h"
 
 static record_engine_state_t engine_state = RECORD_ENGINE_STOPPED;
 static record_engine_config_t engine_config = { FILE_FORMAT_WAV, 22050UL, RECORD_CONTROL_MOTOR };
 static char engine_directory[96];
 static char engine_error[17];
 static bool capture_started = false;
-static bool manual_override = false;
+
+/* Manual pause dominates MOTOR. A user resume clears only this lock; the
+   current MOTOR level is then applied again. */
 static bool paused_by_motor = false;
+static bool paused_by_user = false;
+
 static uint32_t active_started_ms = 0UL;
 static uint32_t pause_started_ms = 0UL;
 static uint32_t paused_total_ms = 0UL;
@@ -28,12 +33,34 @@ static bool is_edge_format(file_format_t format)
     return (format == FILE_FORMAT_LEP) || (format == FILE_FORMAT_L16);
 }
 
+static void record_engine_clear_pause_reason(void)
+{
+    paused_by_motor = false;
+    paused_by_user = false;
+}
+
 static void record_engine_set_error(const char *text)
 {
-    if (text == NULL) text = "REC ERROR";
-    strncpy(engine_error, text, sizeof(engine_error) - 1U);
-    engine_error[sizeof(engine_error) - 1U] = '\0';
+    if (text == NULL)
+    {
+        flash_text_copy(engine_error, sizeof(engine_error), PSTR("REC ERROR"));
+    }
+    else
+    {
+        strncpy(engine_error, text, sizeof(engine_error) - 1U);
+        engine_error[sizeof(engine_error) - 1U] = '\0';
+    }
     engine_state = RECORD_ENGINE_ERROR;
+    record_engine_clear_pause_reason();
+    write_edge_monitor_stop();
+    mz_sense_set(true);
+}
+
+static void record_engine_set_error_P(PGM_P text)
+{
+    flash_text_copy(engine_error, sizeof(engine_error), text);
+    engine_state = RECORD_ENGINE_ERROR;
+    record_engine_clear_pause_reason();
     write_edge_monitor_stop();
     mz_sense_set(true);
 }
@@ -57,7 +84,7 @@ static bool record_engine_begin_capture(void)
     }
     else
     {
-        record_engine_set_error("REC FORMAT");
+        record_engine_set_error_P(PSTR("REC FORMAT"));
         return false;
     }
 
@@ -71,11 +98,12 @@ static bool record_engine_begin_capture(void)
 
     capture_started = true;
     engine_state = RECORD_ENGINE_RECORDING;
+    record_engine_clear_pause_reason();
     active_started_ms = millis();
     pause_started_ms = 0UL;
     paused_total_ms = 0UL;
 
-    if ((engine_config.control_mode == RECORD_CONTROL_AUTO) && !manual_override)
+    if (engine_config.control_mode == RECORD_CONTROL_AUTO)
     {
         /* WAV only needs activity monitoring; LEP/L16 already own edge capture. */
         if (engine_config.format == FILE_FORMAT_WAV)
@@ -107,7 +135,7 @@ static bool record_engine_pause_capture(void)
     }
     if (!ok)
     {
-        record_engine_set_error("REC PAUSE");
+        record_engine_set_error_P(PSTR("REC PAUSE"));
         return false;
     }
     pause_started_ms = millis();
@@ -132,7 +160,7 @@ static bool record_engine_resume_capture(void)
     }
     if (!ok)
     {
-        record_engine_set_error("REC RESUME");
+        record_engine_set_error_P(PSTR("REC RESUME"));
         return false;
     }
     if (pause_started_ms != 0UL)
@@ -141,7 +169,48 @@ static bool record_engine_resume_capture(void)
         pause_started_ms = 0UL;
     }
     engine_state = RECORD_ENGINE_RECORDING;
+    record_engine_clear_pause_reason();
+
+    /* A user resume in AUTO must start a fresh idle interval; otherwise a long
+       manual pause would immediately finalize the recording. */
+    if (engine_config.control_mode == RECORD_CONTROL_AUTO)
+    {
+        auto_last_edge_count = write_edge_monitor_get_edge_count();
+        auto_last_activity_ms = millis();
+    }
     return true;
+}
+
+static void record_engine_pause_for_motor(void)
+{
+    if (record_engine_pause_capture())
+    {
+        paused_by_user = false;
+        paused_by_motor = (engine_state == RECORD_ENGINE_PAUSED);
+    }
+}
+
+static void record_engine_pause_for_user(void)
+{
+    if (record_engine_pause_capture())
+    {
+        paused_by_motor = false;
+        paused_by_user = (engine_state == RECORD_ENGINE_PAUSED);
+    }
+}
+
+static void record_engine_resume_from_user(void)
+{
+    paused_by_user = false;
+
+    if ((engine_config.control_mode == RECORD_CONTROL_MOTOR) && !mz_motor_get())
+    {
+        paused_by_motor = true;
+        return;
+    }
+
+    paused_by_motor = false;
+    (void)record_engine_resume_capture();
 }
 
 void record_engine_init(void)
@@ -155,8 +224,7 @@ void record_engine_init(void)
     engine_directory[0] = '\0';
     engine_error[0] = '\0';
     capture_started = false;
-    manual_override = false;
-    paused_by_motor = false;
+    record_engine_clear_pause_reason();
     active_started_ms = 0UL;
     pause_started_ms = 0UL;
     paused_total_ms = 0UL;
@@ -173,7 +241,7 @@ bool record_engine_start(const char *directory_path, const record_engine_config_
 
     if ((directory_path == NULL) || (config == NULL))
     {
-        record_engine_set_error("REC ARG");
+        record_engine_set_error_P(PSTR("REC ARG"));
         return false;
     }
 
@@ -229,22 +297,33 @@ void record_engine_service(void)
 
     if (engine_state == RECORD_ENGINE_RECORDING || engine_state == RECORD_ENGINE_PAUSED)
     {
-        if ((engine_config.control_mode == RECORD_CONTROL_MOTOR) && !manual_override)
+        if (engine_config.control_mode == RECORD_CONTROL_MOTOR)
         {
             if ((engine_state == RECORD_ENGINE_RECORDING) && !mz_motor_get())
             {
-                paused_by_motor = true;
-                (void)record_engine_pause_capture();
+                record_engine_pause_for_motor();
             }
-            else if ((engine_state == RECORD_ENGINE_PAUSED) && paused_by_motor && mz_motor_get())
+            else if (engine_state == RECORD_ENGINE_PAUSED)
             {
-                paused_by_motor = false;
-                (void)record_engine_resume_capture();
+                /* User pause wins over MOTOR HIGH. */
+                if (paused_by_user)
+                {
+                    /* Stay paused until the user explicitly resumes. */
+                }
+                else if (!mz_motor_get())
+                {
+                    paused_by_motor = true;
+                }
+                else if (paused_by_motor)
+                {
+                    paused_by_motor = false;
+                    (void)record_engine_resume_capture();
+                }
             }
         }
     }
 
-    if ((engine_config.control_mode == RECORD_CONTROL_AUTO) && !manual_override &&
+    if ((engine_config.control_mode == RECORD_CONTROL_AUTO) &&
         (engine_state == RECORD_ENGINE_RECORDING))
     {
         uint16_t edge_count = write_edge_monitor_get_edge_count();
@@ -266,10 +345,21 @@ void record_engine_service(void)
         switch (wav_record_engine_get_state())
         {
             case WAV_RECORD_ENGINE_FINALIZING: engine_state = RECORD_ENGINE_FINALIZING; break;
-            case WAV_RECORD_ENGINE_FINISHED: engine_state = RECORD_ENGINE_FINISHED; write_edge_monitor_stop(); mz_sense_set(true); break;
+            case WAV_RECORD_ENGINE_FINISHED:
+                engine_state = RECORD_ENGINE_FINISHED;
+                record_engine_clear_pause_reason();
+                write_edge_monitor_stop();
+                mz_sense_set(true);
+                break;
             case WAV_RECORD_ENGINE_ERROR: record_engine_set_error(wav_record_engine_get_error_text()); break;
             case WAV_RECORD_ENGINE_PAUSED: engine_state = RECORD_ENGINE_PAUSED; break;
-            case WAV_RECORD_ENGINE_RECORDING: if (engine_state != RECORD_ENGINE_FINALIZING) engine_state = RECORD_ENGINE_RECORDING; break;
+            case WAV_RECORD_ENGINE_RECORDING:
+                if (engine_state != RECORD_ENGINE_FINALIZING)
+                {
+                    engine_state = RECORD_ENGINE_RECORDING;
+                    record_engine_clear_pause_reason();
+                }
+                break;
             default: break;
         }
     }
@@ -279,10 +369,21 @@ void record_engine_service(void)
         switch (edge_record_engine_get_state())
         {
             case EDGE_RECORD_ENGINE_FINALIZING: engine_state = RECORD_ENGINE_FINALIZING; break;
-            case EDGE_RECORD_ENGINE_FINISHED: engine_state = RECORD_ENGINE_FINISHED; write_edge_monitor_stop(); mz_sense_set(true); break;
+            case EDGE_RECORD_ENGINE_FINISHED:
+                engine_state = RECORD_ENGINE_FINISHED;
+                record_engine_clear_pause_reason();
+                write_edge_monitor_stop();
+                mz_sense_set(true);
+                break;
             case EDGE_RECORD_ENGINE_ERROR: record_engine_set_error(edge_record_engine_get_error_text()); break;
             case EDGE_RECORD_ENGINE_PAUSED: engine_state = RECORD_ENGINE_PAUSED; break;
-            case EDGE_RECORD_ENGINE_RECORDING: if (engine_state != RECORD_ENGINE_FINALIZING) engine_state = RECORD_ENGINE_RECORDING; break;
+            case EDGE_RECORD_ENGINE_RECORDING:
+                if (engine_state != RECORD_ENGINE_FINALIZING)
+                {
+                    engine_state = RECORD_ENGINE_RECORDING;
+                    record_engine_clear_pause_reason();
+                }
+                break;
             default: break;
         }
     }
@@ -292,25 +393,23 @@ void record_engine_toggle_pause(void)
 {
     if (engine_state == RECORD_ENGINE_ARMED)
     {
-        manual_override = true;
-        paused_by_motor = false;
-        (void)record_engine_begin_capture();
+        if (record_engine_begin_capture() &&
+            (engine_config.control_mode == RECORD_CONTROL_MOTOR) && !mz_motor_get())
+        {
+            record_engine_pause_for_motor();
+        }
         return;
     }
 
     if (engine_state == RECORD_ENGINE_RECORDING)
     {
-        manual_override = true;
-        paused_by_motor = false;
-        (void)record_engine_pause_capture();
+        record_engine_pause_for_user();
         return;
     }
 
     if (engine_state == RECORD_ENGINE_PAUSED)
     {
-        manual_override = true;
-        paused_by_motor = false;
-        (void)record_engine_resume_capture();
+        record_engine_resume_from_user();
     }
 }
 
@@ -332,6 +431,7 @@ void record_engine_request_stop(void)
             edge_record_engine_request_stop();
         }
         engine_state = RECORD_ENGINE_FINALIZING;
+        record_engine_clear_pause_reason();
         write_edge_monitor_stop();
     }
 }
@@ -356,8 +456,7 @@ void record_engine_cancel(void)
     /* Keep the result visible; short LEFT acknowledges it and returns. */
     engine_state = RECORD_ENGINE_CANCELLED;
     capture_started = false;
-    manual_override = false;
-    paused_by_motor = false;
+    record_engine_clear_pause_reason();
     write_edge_monitor_stop();
     mz_sense_set(true);
 }
@@ -365,16 +464,12 @@ void record_engine_cancel(void)
 record_engine_state_t record_engine_get_state(void) { return engine_state; }
 file_format_t record_engine_get_format(void) { return engine_config.format; }
 record_control_mode_t record_engine_get_control_mode(void) { return engine_config.control_mode; }
-record_control_mode_t record_engine_get_display_control_mode(void)
-{
-    return manual_override ? RECORD_CONTROL_MANUAL : engine_config.control_mode;
-}
 const char *record_engine_get_filename(void)
 {
     const char *name = (engine_config.format == FILE_FORMAT_WAV) ?
         wav_record_engine_get_filename() : edge_record_engine_get_filename();
 
-    return (name != NULL && name[0] != '\0') ? name : "REC";
+    return (name != NULL && name[0] != '\0') ? name : NULL;
 }
 const char *record_engine_get_error_text(void) { return engine_error; }
 bool record_engine_cancelled_file_removed(void) { return cancelled_file_removed; }
@@ -393,4 +488,11 @@ uint32_t record_engine_get_elapsed_seconds(void)
         pause_started_ms : millis();
     if (end_ms < active_started_ms + paused_total_ms) return 0UL;
     return (end_ms - active_started_ms - paused_total_ms) / 1000UL;
+}
+char record_engine_get_pause_indicator(void)
+{
+    if (engine_state != RECORD_ENGINE_PAUSED) return '\0';
+    if (paused_by_user) return 'U';
+    if (paused_by_motor) return 'M';
+    return '\0';
 }

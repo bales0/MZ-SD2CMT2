@@ -16,7 +16,7 @@ void mz_read_set(bool level);
 void mz_sense_set(bool level);
 void mz_led_set(bool level);
 
-/* Foreground transport helpers for the ULTRA FAST handshake. */
+/* Foreground direct helpers for the CMT transports. */
 void mz_read_set_fast(bool level);
 void mz_sense_set_fast(bool level);
 

@@ -1,9 +1,9 @@
 #include "record_menu.h"
 
 #include <Arduino.h>
-#include <stdio.h>
 
 #include "../drivers/lcd.h"
+#include "../drivers/flash_text.h"
 
 typedef enum
 {
@@ -22,38 +22,70 @@ typedef enum
 } record_type_t;
 
 static record_menu_item_t selected_item = RECORD_MENU_ITEM_TYPE;
-/* Preserve the previously safe default: WAV at 22.05 kHz. */
 static record_type_t record_type = RECORD_TYPE_WAV_22K;
 static record_control_mode_t control_mode = RECORD_CONTROL_MOTOR;
 
-static void lcd_line(uint8_t row, const char *text)
+static const char text_rec_type[] PROGMEM = ">REC TYPE";
+static const char text_rec_mode[] PROGMEM = ">REC MODE";
+static const char text_motor[] PROGMEM = "MOTOR";
+static const char text_auto[] PROGMEM = "AUTO";
+static const char text_manual[] PROGMEM = "MANUAL";
+static const char text_lep[] PROGMEM = "LEP 50us";
+static const char text_l16[] PROGMEM = "L16 16us";
+static const char text_wav22[] PROGMEM = "WAV 22kHz";
+static const char text_wav44[] PROGMEM = "WAV 44kHz";
+static const char text_unknown[] PROGMEM = "?";
+
+static void lcd_line_P(uint8_t row, PGM_P text)
 {
     char line[17];
-    snprintf(line, sizeof(line), "%-16s", text != NULL ? text : "");
-    lcd_set_cursor(0, row);
+    uint8_t length;
+    flash_text_copy(line, sizeof(line), text);
+    for (length = 0U; (length < 16U) && (line[length] != '\0'); ++length) {}
+    while (length < 16U) line[length++] = ' ';
+    line[16] = '\0';
+    lcd_set_cursor(0U, row);
     lcd_print(line);
 }
 
-const char *record_control_mode_label(record_control_mode_t mode)
+static void lcd_value_line_P(PGM_P text)
+{
+    char line[17];
+    line[0] = ' ';
+    flash_text_copy(&line[1], sizeof(line) - 1U, text);
+    for (uint8_t i = 0U; i < 16U; ++i)
+    {
+        if (line[i] == '\0')
+        {
+            for (; i < 16U; ++i) line[i] = ' ';
+            break;
+        }
+    }
+    line[16] = '\0';
+    lcd_set_cursor(0U, 1U);
+    lcd_print(line);
+}
+
+PGM_P record_control_mode_label_P(record_control_mode_t mode)
 {
     switch (mode)
     {
-        case RECORD_CONTROL_MOTOR: return "MOTOR";
-        case RECORD_CONTROL_AUTO: return "AUTO";
-        case RECORD_CONTROL_MANUAL: return "MANUAL";
-        default: return "?";
+        case RECORD_CONTROL_AUTO: return text_auto;
+        case RECORD_CONTROL_MANUAL: return text_manual;
+        case RECORD_CONTROL_MOTOR:
+        default: return text_motor;
     }
 }
 
-static const char *record_type_label(void)
+static PGM_P record_type_label_P(void)
 {
     switch (record_type)
     {
-        case RECORD_TYPE_LEP: return "LEP 50us";
-        case RECORD_TYPE_L16: return "L16 16us";
-        case RECORD_TYPE_WAV_22K: return "WAV 22kHz";
-        case RECORD_TYPE_WAV_44K: return "WAV 44kHz";
-        default: return "?";
+        case RECORD_TYPE_LEP: return text_lep;
+        case RECORD_TYPE_L16: return text_l16;
+        case RECORD_TYPE_WAV_22K: return text_wav22;
+        case RECORD_TYPE_WAV_44K: return text_wav44;
+        default: return text_unknown;
     }
 }
 
@@ -85,9 +117,6 @@ record_menu_action_t record_menu_handle_event(button_event_t event)
     {
         case BUTTON_EVENT_UP_PRESS:
         case BUTTON_EVENT_UP_REPEAT:
-            selected_item = (selected_item == RECORD_MENU_ITEM_TYPE) ?
-                RECORD_MENU_ITEM_CONTROL : RECORD_MENU_ITEM_TYPE;
-            break;
         case BUTTON_EVENT_DOWN_PRESS:
         case BUTTON_EVENT_DOWN_REPEAT:
             selected_item = (selected_item == RECORD_MENU_ITEM_TYPE) ?
@@ -107,19 +136,14 @@ record_menu_action_t record_menu_handle_event(button_event_t event)
 
 void record_menu_render(void)
 {
-    char line[17];
     if (selected_item == RECORD_MENU_ITEM_TYPE)
     {
-        lcd_line(0, ">REC TYPE");
-        snprintf(line, sizeof(line), " %s", record_type_label());
-        lcd_line(1, line);
+        lcd_line_P(0U, text_rec_type);
+        lcd_value_line_P(record_type_label_P());
+        return;
     }
-    else
-    {
-        lcd_line(0, ">REC MODE");
-        snprintf(line, sizeof(line), " %s", record_control_mode_label(control_mode));
-        lcd_line(1, line);
-    }
+    lcd_line_P(0U, text_rec_mode);
+    lcd_value_line_P(record_control_mode_label_P(control_mode));
 }
 
 file_format_t record_menu_get_format(void)

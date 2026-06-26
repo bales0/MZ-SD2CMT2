@@ -6,6 +6,7 @@
 #include "drivers/keypad.h"
 #include "drivers/calibration_store.h"
 #include "drivers/sdcard.h"
+#include "drivers/flash_text.h"
 
 #include "play/play_controller.h"
 #include "ui/browser.h"
@@ -35,15 +36,33 @@ static uint32_t last_active_keypad_poll_ms = 0U;
 static bool sd_ok = false;
 static app_screen_t current_screen = APP_SCREEN_BROWSER;
 
-/* Fixed root-level destination for WAV, LEP and L16 recordings. */
-static const char RECORDINGS_DIRECTORY[] = "/RECORDINGS";
+/* Fixed root-level destination copied from flash only when RECORD starts. */
+static const char recordings_directory_P[] PROGMEM = "/RECORDINGS";
+static char recordings_directory[12];
 
 static void lcd_print_line(uint8_t row, const char *text)
 {
     char line[17];
-    snprintf(line, sizeof(line), "%-16s", text != NULL ? text : "");
-    lcd_set_cursor(0, row);
+    uint8_t length = 0U;
+    if (text != NULL)
+    {
+        while ((length < 16U) && (text[length] != '\0'))
+        {
+            line[length] = text[length];
+            ++length;
+        }
+    }
+    while (length < 16U) line[length++] = ' ';
+    line[16] = '\0';
+    lcd_set_cursor(0U, row);
     lcd_print(line);
+}
+
+static void lcd_print_line_P(uint8_t row, PGM_P text)
+{
+    char line[17];
+    flash_text_copy(line, sizeof(line), text);
+    lcd_print_line(row, line);
 }
 
 static uint16_t adc_average(uint8_t samples)
@@ -59,8 +78,8 @@ static uint16_t adc_average(uint8_t samples)
 
 static void wait_for_release(void)
 {
-    lcd_print_line(0, "RELEASE ALL");
-    lcd_print_line(1, "WAIT...");
+    lcd_print_line_P(0U, PSTR("RELEASE ALL"));
+    lcd_print_line_P(1U, PSTR("WAIT..."));
     while (keypad_read_raw() < CALIBRATION_RELEASED_THRESHOLD) delay(20);
     delay(200);
 }
@@ -68,27 +87,29 @@ static void wait_for_release(void)
 static uint16_t calibrate_none(void)
 {
     lcd_clear();
-    lcd_print_line(0, "CAL NONE");
-    lcd_print_line(1, "RELEASE ALL");
+    lcd_print_line_P(0U, PSTR("CAL NONE"));
+    lcd_print_line_P(1U, PSTR("RELEASE ALL"));
     while (keypad_read_raw() < CALIBRATION_RELEASED_THRESHOLD) delay(20);
     delay(500);
     return adc_average(32);
 }
 
-static uint16_t calibrate_button(const char *name)
+static uint16_t calibrate_button(PGM_P name)
 {
     char line0[17];
     char line1[17];
-    snprintf(line0, sizeof(line0), "PRESS %-10s", name);
+    char name_ram[12];
+    flash_text_copy(name_ram, sizeof(name_ram), name);
+    flash_text_snprintf(line0, sizeof(line0), PSTR("PRESS %-10s"), name_ram);
     lcd_clear();
     lcd_print_line(0, line0);
-    lcd_print_line(1, "WAIT INPUT");
+    lcd_print_line_P(1U, PSTR("WAIT INPUT"));
     while (keypad_read_raw() > CALIBRATION_PRESSED_THRESHOLD) delay(20);
     delay(250);
     uint16_t value = adc_average(32);
-    snprintf(line1, sizeof(line1), "ADC:%4u", value);
-    lcd_print_line(0, name);
-    lcd_print_line(1, line1);
+    flash_text_snprintf(line1, sizeof(line1), PSTR("ADC:%4u"), value);
+    lcd_print_line(0U, name_ram);
+    lcd_print_line(1U, line1);
     delay(700);
     wait_for_release();
     return value;
@@ -103,15 +124,15 @@ static bool run_keypad_calibration(keypad_calibration_t *calibration)
 {
     if (calibration == NULL) return false;
     lcd_clear();
-    lcd_print_line(0, "KEYPAD");
-    lcd_print_line(1, "CALIBRATION");
+    lcd_print_line_P(0U, PSTR("KEYPAD"));
+    lcd_print_line_P(1U, PSTR("CALIBRATION"));
     delay(1200);
     calibration->none = calibrate_none();
-    calibration->up = calibrate_button("UP");
-    calibration->down = calibrate_button("DOWN");
-    calibration->left = calibrate_button("LEFT");
-    calibration->right = calibrate_button("RIGHT");
-    calibration->select = calibrate_button("SELECT");
+    calibration->up = calibrate_button(PSTR("UP"));
+    calibration->down = calibrate_button(PSTR("DOWN"));
+    calibration->left = calibrate_button(PSTR("LEFT"));
+    calibration->right = calibrate_button(PSTR("RIGHT"));
+    calibration->select = calibrate_button(PSTR("SELECT"));
     if (!keypad_calibration_is_valid(calibration)) return false;
     return calibration_store_save_keypad(calibration);
 }
@@ -128,7 +149,6 @@ static void app_enter_play(const char *filename, const char *full_path)
 {
     browser_save_position();
     play_controller_start_session(filename, full_path,
-                                  menu_get_play_mode(),
                                   menu_get_invert_signal(),
                                   menu_get_play_control_mode());
     current_screen = APP_SCREEN_PLAY;
@@ -143,7 +163,7 @@ static void app_enter_record(void)
     config.format = record_menu_get_format();
     config.wav_sample_rate = record_menu_get_wav_sample_rate();
     config.control_mode = record_menu_get_control_mode();
-    (void)record_engine_start(RECORDINGS_DIRECTORY, &config);
+    (void)record_engine_start(recordings_directory, &config);
     current_screen = APP_SCREEN_RECORD;
     lcd_clear();
 }
@@ -237,6 +257,7 @@ static void app_handle_record_event(button_event_t event)
 
 void setup()
 {
+    flash_text_copy(recordings_directory, sizeof(recordings_directory), recordings_directory_P);
     sdcard_early_prepare_pins();
     sd_ok = sdcard_init();
     lcd_init();

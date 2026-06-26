@@ -1,6 +1,8 @@
 #include "wav_reader.h"
 
 #include <string.h>
+#include <avr/pgmspace.h>
+#include <avr/pgmspace.h>
 
 #include "../drivers/sdcard.h"
 
@@ -86,9 +88,18 @@ static bool wav_skip_chunk(uint32_t chunk_data_position,
     return wav_skip_to(next_position);
 }
 
+static bool wav_fourcc_equals(const uint8_t *value,
+                              uint8_t c0, uint8_t c1,
+                              uint8_t c2, uint8_t c3)
+{
+    return (value != NULL) &&
+           (value[0] == c0) && (value[1] == c1) &&
+           (value[2] == c2) && (value[3] == c3);
+}
+
 static bool wav_is_pcm_subformat(const uint8_t *guid)
 {
-    static const uint8_t pcm_tail[14] =
+    static const uint8_t pcm_tail[14] PROGMEM =
     {
         0x00, 0x00, 0x00, 0x00,
         0x10, 0x00,
@@ -103,7 +114,7 @@ static bool wav_is_pcm_subformat(const uint8_t *guid)
     }
 
     return (wav_read_le16(guid) == WAV_FORMAT_PCM) &&
-           (memcmp(guid + 2, pcm_tail, sizeof(pcm_tail)) == 0);
+           (memcmp_P(guid + 2, pcm_tail, sizeof(pcm_tail)) == 0);
 }
 
 static void wav_close_with_status(wav_reader_status_t status)
@@ -158,13 +169,13 @@ bool wav_reader_open(const char *path, wav_reader_info_t *info)
         return false;
     }
 
-    if (memcmp(riff_header, "RIFF", 4) != 0)
+    if (!wav_fourcc_equals(riff_header, 'R', 'I', 'F', 'F'))
     {
         wav_close_with_status(WAV_READER_STATUS_NOT_RIFF);
         return false;
     }
 
-    if (memcmp(riff_header + 8, "WAVE", 4) != 0)
+    if (!wav_fourcc_equals(riff_header + 8, 'W', 'A', 'V', 'E'))
     {
         wav_close_with_status(WAV_READER_STATUS_NOT_WAVE);
         return false;
@@ -208,7 +219,7 @@ bool wav_reader_open(const char *path, wav_reader_info_t *info)
         chunk_size = wav_read_le32(chunk_header + 4);
         chunk_data_position = sdcard_file_position();
 
-        if (memcmp(chunk_header, "fmt ", 4) == 0)
+        if (wav_fourcc_equals(chunk_header, 'f', 'm', 't', ' '))
         {
             if (chunk_size < sizeof(fmt_data))
             {
@@ -258,7 +269,7 @@ bool wav_reader_open(const char *path, wav_reader_info_t *info)
                 return false;
             }
         }
-        else if (memcmp(chunk_header, "data", 4) == 0)
+        else if (wav_fourcc_equals(chunk_header, 'd', 'a', 't', 'a'))
         {
             uint32_t data_end_position;
 
@@ -438,24 +449,24 @@ wav_reader_status_t wav_reader_last_status(void)
     return wav_status;
 }
 
-const char *wav_reader_status_text(wav_reader_status_t status)
+PGM_P wav_reader_status_text_P(wav_reader_status_t status)
 {
     switch (status)
     {
-        case WAV_READER_STATUS_OK: return "OK";
-        case WAV_READER_STATUS_BAD_ARGUMENT: return "BAD ARG";
-        case WAV_READER_STATUS_OPEN_ERROR: return "OPEN ERROR";
-        case WAV_READER_STATUS_IO_ERROR: return "IO ERROR";
-        case WAV_READER_STATUS_NOT_RIFF: return "NOT RIFF";
-        case WAV_READER_STATUS_NOT_WAVE: return "NOT WAVE";
-        case WAV_READER_STATUS_BAD_RIFF_SIZE: return "BAD RIFF";
-        case WAV_READER_STATUS_NO_FMT_CHUNK: return "NO FMT";
-        case WAV_READER_STATUS_NO_DATA_CHUNK: return "NO DATA";
-        case WAV_READER_STATUS_UNSUPPORTED_FORMAT: return "PCM ONLY";
-        case WAV_READER_STATUS_UNSUPPORTED_CHANNELS: return "MONO ONLY";
-        case WAV_READER_STATUS_UNSUPPORTED_BITS: return "8BIT ONLY";
-        case WAV_READER_STATUS_UNSUPPORTED_RATE: return "BAD RATE";
-        case WAV_READER_STATUS_BAD_LAYOUT: return "BAD WAV";
-        default: return "WAV ERROR";
+        case WAV_READER_STATUS_OK: return PSTR("OK");
+        case WAV_READER_STATUS_BAD_ARGUMENT: return PSTR("BAD ARG");
+        case WAV_READER_STATUS_OPEN_ERROR: return PSTR("OPEN ERROR");
+        case WAV_READER_STATUS_IO_ERROR: return PSTR("IO ERROR");
+        case WAV_READER_STATUS_NOT_RIFF: return PSTR("NOT RIFF");
+        case WAV_READER_STATUS_NOT_WAVE: return PSTR("NOT WAVE");
+        case WAV_READER_STATUS_BAD_RIFF_SIZE: return PSTR("BAD RIFF");
+        case WAV_READER_STATUS_NO_FMT_CHUNK: return PSTR("NO FMT");
+        case WAV_READER_STATUS_NO_DATA_CHUNK: return PSTR("NO DATA");
+        case WAV_READER_STATUS_UNSUPPORTED_FORMAT: return PSTR("PCM ONLY");
+        case WAV_READER_STATUS_UNSUPPORTED_CHANNELS: return PSTR("MONO ONLY");
+        case WAV_READER_STATUS_UNSUPPORTED_BITS: return PSTR("8BIT ONLY");
+        case WAV_READER_STATUS_UNSUPPORTED_RATE: return PSTR("BAD RATE");
+        case WAV_READER_STATUS_BAD_LAYOUT: return PSTR("BAD WAV");
+        default: return PSTR("WAV ERROR");
     }
 }

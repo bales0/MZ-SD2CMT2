@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <avr/pgmspace.h>
 #include "../drivers/keypad.h"
 #include "../formats/file_format.h"
 
@@ -26,6 +27,6 @@ void record_menu_render(void);
 file_format_t record_menu_get_format(void);
 uint32_t record_menu_get_wav_sample_rate(void);
 record_control_mode_t record_menu_get_control_mode(void);
-const char *record_control_mode_label(record_control_mode_t mode);
+PGM_P record_control_mode_label_P(record_control_mode_t mode);
 
 #endif

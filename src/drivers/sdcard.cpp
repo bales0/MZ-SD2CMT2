@@ -4,6 +4,7 @@
 #include <SPI.h>
 #include <SdFat.h>
 #include <string.h>
+#include "flash_text.h"
 
 /*
     SD2CMT2 Reborn - Arduino Mega 2560 SD SPI mapping
@@ -35,7 +36,12 @@ static SdFat sd;
 static FsFile sdcard_stream_file;
 
 static bool sdcard_mounted = false;
-static const char *sdcard_error = "NOT INIT";
+static char sdcard_error[17];
+
+static void sdcard_set_error_P(PGM_P text)
+{
+    flash_text_copy(sdcard_error, sizeof(sdcard_error), text);
+}
 static uint8_t sdcard_error_code = 0;
 static uint8_t sdcard_error_data = 0;
 
@@ -51,7 +57,7 @@ static void sdcard_set_card_error(void)
 {
     sdcard_close_all_files();
     sdcard_mounted = false;
-    sdcard_error = "SD CARD ERROR";
+    sdcard_set_error_P(PSTR("SD CARD ERROR"));
 
     if (sd.card() != NULL)
     {
@@ -90,6 +96,7 @@ static bool sdcard_probe_present(void)
 
 void sdcard_early_prepare_pins(void)
 {
+    if (sdcard_error[0] == '\0') sdcard_set_error_P(PSTR("NOT INIT"));
     pinMode(SD_CHIP_SELECT_PIN, OUTPUT);
     digitalWrite(SD_CHIP_SELECT_PIN, HIGH);
 
@@ -119,7 +126,7 @@ static bool sdcard_initialize(bool force_reinitialize)
 
     if (!force_reinitialize && sdcard_mounted && sdcard_probe_present())
     {
-        sdcard_error = "OK";
+        sdcard_set_error_P(PSTR("OK"));
         sdcard_error_code = 0;
         sdcard_error_data = 0;
         return true;
@@ -127,7 +134,7 @@ static bool sdcard_initialize(bool force_reinitialize)
 
     sdcard_close_all_files();
     sdcard_mounted = false;
-    sdcard_error = "SD CARD ERROR";
+    sdcard_set_error_P(PSTR("SD CARD ERROR"));
     sdcard_error_code = 0;
     sdcard_error_data = 0;
 
@@ -151,7 +158,7 @@ static bool sdcard_initialize(bool force_reinitialize)
         return false;
     }
 
-    sdcard_error = "OK";
+    sdcard_set_error_P(PSTR("OK"));
     sdcard_error_code = 0;
     sdcard_error_data = 0;
     return true;
@@ -180,7 +187,7 @@ uint16_t sdcard_count_entries(const char *path, uint16_t max_entries)
 
     if (path == NULL)
     {
-        sdcard_error = "BAD PATH";
+        sdcard_set_error_P(PSTR("BAD PATH"));
         return 0;
     }
 
@@ -195,14 +202,14 @@ uint16_t sdcard_count_entries(const char *path, uint16_t max_entries)
         {
             return 0;
         }
-        sdcard_error = "DIR FAIL";
+        sdcard_set_error_P(PSTR("DIR FAIL"));
         return 0;
     }
 
     if (!dir.isDir())
     {
         dir.close();
-        sdcard_error = "NOT DIR";
+        sdcard_set_error_P(PSTR("NOT DIR"));
         return 0;
     }
 
@@ -224,7 +231,7 @@ uint16_t sdcard_count_entries(const char *path, uint16_t max_entries)
         return 0;
     }
 
-    sdcard_error = "OK";
+    sdcard_set_error_P(PSTR("OK"));
     return count;
 }
 
@@ -236,13 +243,13 @@ bool sdcard_read_entry_by_index(const char *path, uint16_t index, sdcard_entry_t
 
     if (path == NULL)
     {
-        sdcard_error = "BAD PATH";
+        sdcard_set_error_P(PSTR("BAD PATH"));
         return false;
     }
 
     if (entry == NULL)
     {
-        sdcard_error = "BAD ARG";
+        sdcard_set_error_P(PSTR("BAD ARG"));
         return false;
     }
 
@@ -259,14 +266,14 @@ bool sdcard_read_entry_by_index(const char *path, uint16_t index, sdcard_entry_t
         {
             return false;
         }
-        sdcard_error = "DIR FAIL";
+        sdcard_set_error_P(PSTR("DIR FAIL"));
         return false;
     }
 
     if (!dir.isDir())
     {
         dir.close();
-        sdcard_error = "NOT DIR";
+        sdcard_set_error_P(PSTR("NOT DIR"));
         return false;
     }
 
@@ -288,7 +295,7 @@ bool sdcard_read_entry_by_index(const char *path, uint16_t index, sdcard_entry_t
                 return false;
             }
 
-            sdcard_error = "OK";
+            sdcard_set_error_P(PSTR("OK"));
             return true;
         }
 
@@ -303,11 +310,10 @@ bool sdcard_read_entry_by_index(const char *path, uint16_t index, sdcard_entry_t
         return false;
     }
 
-    strncpy(entry->name, "NO ENTRY", sizeof(entry->name) - 1U);
-    entry->name[sizeof(entry->name) - 1U] = '\0';
+    flash_text_copy(entry->name, sizeof(entry->name), PSTR("NO ENTRY"));
     entry->is_dir = false;
     entry->size = 0;
-    sdcard_error = "NO ENTRY";
+    sdcard_set_error_P(PSTR("NO ENTRY"));
     return false;
 }
 
@@ -405,12 +411,12 @@ static bool sdcard_open_directory_for_browser(const char *path, FsFile *director
 {
     if (path == NULL)
     {
-        sdcard_error = "BAD PATH";
+        sdcard_set_error_P(PSTR("BAD PATH"));
         return false;
     }
     if (directory == NULL)
     {
-        sdcard_error = "BAD ARG";
+        sdcard_set_error_P(PSTR("BAD ARG"));
         return false;
     }
     if (!sdcard_probe_present())
@@ -423,13 +429,13 @@ static bool sdcard_open_directory_for_browser(const char *path, FsFile *director
         {
             return false;
         }
-        sdcard_error = "DIR FAIL";
+        sdcard_set_error_P(PSTR("DIR FAIL"));
         return false;
     }
     if (!directory->isDir())
     {
         directory->close();
-        sdcard_error = "NOT DIR";
+        sdcard_set_error_P(PSTR("NOT DIR"));
         return false;
     }
     return true;
@@ -457,7 +463,7 @@ bool sdcard_scan_directory_first_sorted(const char *path,
 
     if ((entry_count == NULL) || (first_entry == NULL))
     {
-        sdcard_error = "BAD ARG";
+        sdcard_set_error_P(PSTR("BAD ARG"));
         return false;
     }
 
@@ -502,7 +508,7 @@ bool sdcard_scan_directory_first_sorted(const char *path,
         *first_entry = candidate;
     }
 
-    sdcard_error = "OK";
+    sdcard_set_error_P(PSTR("OK"));
     return true;
 }
 
@@ -515,7 +521,7 @@ static bool sdcard_read_sorted_extreme(const char *path,
 
     if (entry == NULL)
     {
-        sdcard_error = "BAD ARG";
+        sdcard_set_error_P(PSTR("BAD ARG"));
         return false;
     }
     memset(entry, 0, sizeof(sdcard_entry_t));
@@ -565,7 +571,7 @@ static bool sdcard_read_sorted_extreme(const char *path,
         if (have_candidate)
         {
             *entry = candidate;
-            sdcard_error = "OK";
+            sdcard_set_error_P(PSTR("OK"));
             return true;
         }
 
@@ -575,7 +581,7 @@ static bool sdcard_read_sorted_extreme(const char *path,
         }
     }
 
-    sdcard_error = "NO ENTRY";
+    sdcard_set_error_P(PSTR("NO ENTRY"));
     return false;
 }
 
@@ -592,7 +598,7 @@ bool sdcard_read_first_sorted_entry(const char *path,
 
     if (count == 0U)
     {
-        sdcard_error = "NO ENTRY";
+        sdcard_set_error_P(PSTR("NO ENTRY"));
         return false;
     }
 
@@ -621,7 +627,7 @@ bool sdcard_read_sorted_neighbor(const char *path,
 
     if ((reference == NULL) || (entry == NULL))
     {
-        sdcard_error = "BAD ARG";
+        sdcard_set_error_P(PSTR("BAD ARG"));
         return false;
     }
     reference_copy = *reference;
@@ -674,12 +680,12 @@ bool sdcard_read_sorted_neighbor(const char *path,
     }
     if (!have_candidate)
     {
-        sdcard_error = "NO ENTRY";
+        sdcard_set_error_P(PSTR("NO ENTRY"));
         return false;
     }
 
     *entry = candidate;
-    sdcard_error = "OK";
+    sdcard_set_error_P(PSTR("OK"));
     return true;
 }
 
@@ -699,7 +705,7 @@ bool sdcard_find_sorted_entry_by_identity(const char *path,
 
     if ((name == NULL) || (sorted_index == NULL) || (entry == NULL))
     {
-        sdcard_error = "BAD ARG";
+        sdcard_set_error_P(PSTR("BAD ARG"));
         return false;
     }
 
@@ -736,7 +742,7 @@ bool sdcard_find_sorted_entry_by_identity(const char *path,
     }
     if (!found)
     {
-        sdcard_error = "NO ENTRY";
+        sdcard_set_error_P(PSTR("NO ENTRY"));
         return false;
     }
 
@@ -772,7 +778,7 @@ bool sdcard_find_sorted_entry_by_identity(const char *path,
 
     *sorted_index = rank;
     *entry = matching_entry;
-    sdcard_error = "OK";
+    sdcard_set_error_P(PSTR("OK"));
     return true;
 }
 
@@ -780,7 +786,7 @@ bool sdcard_file_open_read(const char *path)
 {
     if (path == NULL)
     {
-        sdcard_error = "BAD PATH";
+        sdcard_set_error_P(PSTR("BAD PATH"));
         return false;
     }
 
@@ -800,11 +806,11 @@ bool sdcard_file_open_read(const char *path)
         {
             return false;
         }
-        sdcard_error = "FILE OPEN FAIL";
+        sdcard_set_error_P(PSTR("FILE OPEN FAIL"));
         return false;
     }
 
-    sdcard_error = "OK";
+    sdcard_set_error_P(PSTR("OK"));
     return true;
 }
 
@@ -812,7 +818,7 @@ bool sdcard_file_open_write(const char *path)
 {
     if (path == NULL)
     {
-        sdcard_error = "BAD PATH";
+        sdcard_set_error_P(PSTR("BAD PATH"));
         return false;
     }
 
@@ -832,11 +838,11 @@ bool sdcard_file_open_write(const char *path)
         {
             return false;
         }
-        sdcard_error = "FILE CREATE FAIL";
+        sdcard_set_error_P(PSTR("FILE CREATE FAIL"));
         return false;
     }
 
-    sdcard_error = "OK";
+    sdcard_set_error_P(PSTR("OK"));
     return true;
 }
 
@@ -903,7 +909,7 @@ bool sdcard_ensure_directory(const char *directory_path)
     if ((directory_path == NULL) || (directory_path[0] != '/') ||
         (directory_path[1] == '\0'))
     {
-        sdcard_error = "BAD DIRECTORY";
+        sdcard_set_error_P(PSTR("BAD DIRECTORY"));
         return false;
     }
 
@@ -918,7 +924,7 @@ bool sdcard_ensure_directory(const char *directory_path)
         {
             return false;
         }
-        sdcard_error = "MKDIR FAIL";
+        sdcard_set_error_P(PSTR("MKDIR FAIL"));
         return false;
     }
 
@@ -928,19 +934,19 @@ bool sdcard_ensure_directory(const char *directory_path)
         {
             return false;
         }
-        sdcard_error = "DIR FAIL";
+        sdcard_set_error_P(PSTR("DIR FAIL"));
         return false;
     }
 
     if (!directory.isDir())
     {
         directory.close();
-        sdcard_error = "NOT DIR";
+        sdcard_set_error_P(PSTR("NOT DIR"));
         return false;
     }
 
     directory.close();
-    sdcard_error = "OK";
+    sdcard_set_error_P(PSTR("OK"));
     return true;
 }
 
@@ -962,7 +968,7 @@ bool sdcard_next_record_sequence(const char *directory_path,
         {
             directory.close();
         }
-        sdcard_error = "DIR FAIL";
+        sdcard_set_error_P(PSTR("DIR FAIL"));
         return false;
     }
 
@@ -993,12 +999,12 @@ bool sdcard_next_record_sequence(const char *directory_path,
 
     if (highest >= 9999U)
     {
-        sdcard_error = "REC NAMES FULL";
+        sdcard_set_error_P(PSTR("REC NAMES FULL"));
         return false;
     }
 
     *next_sequence = (uint16_t)(highest + 1U);
-    sdcard_error = "OK";
+    sdcard_set_error_P(PSTR("OK"));
     return true;
 }
 
@@ -1008,7 +1014,7 @@ int16_t sdcard_file_read(void *buffer, uint16_t size)
 
     if ((buffer == NULL) || (size == 0U))
     {
-        sdcard_error = "BAD ARG";
+        sdcard_set_error_P(PSTR("BAD ARG"));
         return -1;
     }
 
@@ -1033,7 +1039,7 @@ int16_t sdcard_file_read(void *buffer, uint16_t size)
         {
             return -1;
         }
-        sdcard_error = "FILE READ FAIL";
+        sdcard_set_error_P(PSTR("FILE READ FAIL"));
         return -1;
     }
 
@@ -1046,7 +1052,7 @@ int16_t sdcard_file_write(const void *buffer, uint16_t size)
 
     if ((buffer == NULL) || (size == 0U))
     {
-        sdcard_error = "BAD ARG";
+        sdcard_set_error_P(PSTR("BAD ARG"));
         return -1;
     }
 
@@ -1064,7 +1070,7 @@ int16_t sdcard_file_write(const void *buffer, uint16_t size)
         {
             return -1;
         }
-        sdcard_error = "FILE WRITE FAIL";
+        sdcard_set_error_P(PSTR("FILE WRITE FAIL"));
         return -1;
     }
 
@@ -1085,11 +1091,11 @@ bool sdcard_file_preallocate(uint32_t length)
         {
             return false;
         }
-        sdcard_error = "PREALLOC FAIL";
+        sdcard_set_error_P(PSTR("PREALLOC FAIL"));
         return false;
     }
 
-    sdcard_error = "OK";
+    sdcard_set_error_P(PSTR("OK"));
     return true;
 }
 
@@ -1107,11 +1113,11 @@ bool sdcard_file_truncate(uint32_t length)
         {
             return false;
         }
-        sdcard_error = "FILE TRUNC FAIL";
+        sdcard_set_error_P(PSTR("FILE TRUNC FAIL"));
         return false;
     }
 
-    sdcard_error = "OK";
+    sdcard_set_error_P(PSTR("OK"));
     return true;
 }
 
@@ -1144,7 +1150,7 @@ bool sdcard_file_sync(void)
         {
             return false;
         }
-        sdcard_error = "FILE SYNC FAIL";
+        sdcard_set_error_P(PSTR("FILE SYNC FAIL"));
         return false;
     }
 
@@ -1165,7 +1171,7 @@ bool sdcard_file_seek(uint32_t position)
         {
             return false;
         }
-        sdcard_error = "FILE SEEK FAIL";
+        sdcard_set_error_P(PSTR("FILE SEEK FAIL"));
         return false;
     }
 
@@ -1201,7 +1207,7 @@ bool sdcard_file_remove(const char *path)
 {
     if ((path == NULL) || !sdcard_mounted)
     {
-        sdcard_error = "BAD PATH";
+        sdcard_set_error_P(PSTR("BAD PATH"));
         return false;
     }
 
@@ -1211,22 +1217,24 @@ bool sdcard_file_remove(const char *path)
         {
             return false;
         }
-        sdcard_error = "FILE REMOVE ERR";
+        sdcard_set_error_P(PSTR("FILE REMOVE ERR"));
         return false;
     }
 
-    sdcard_error = "OK";
+    sdcard_set_error_P(PSTR("OK"));
     return true;
 }
 
 uint16_t sdcard_count_root_entries(uint16_t max_entries)
 {
-    return sdcard_count_entries("/", max_entries);
+    const char root_path[2] = { '/', '\0' };
+    return sdcard_count_entries(root_path, max_entries);
 }
 
 bool sdcard_read_root_entry_by_index(uint16_t index, sdcard_entry_t *entry)
 {
-    return sdcard_read_entry_by_index("/", index, entry);
+    const char root_path[2] = { '/', '\0' };
+    return sdcard_read_entry_by_index(root_path, index, entry);
 }
 
 const char *sdcard_last_error(void)

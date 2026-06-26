@@ -61,8 +61,5 @@ void keypad_get_default_calibration(keypad_calibration_t *calibration);
 
 bool keypad_calibration_is_valid(const keypad_calibration_t *calibration);
 
-const char *keypad_button_name(button_t button);
-
-const char *keypad_event_name(button_event_t event);
 
 #endif

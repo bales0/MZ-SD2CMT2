@@ -1,18 +1,57 @@
 #include "record_screen.h"
 
 #include <Arduino.h>
-#include <stdio.h>
 
 #include "../drivers/lcd.h"
+#include "../drivers/flash_text.h"
 #include "../record/record_engine.h"
-#include "record_menu.h"
+
+static const char text_rec_fallback[] PROGMEM = "REC";
+static const char text_wait_signal[] PROGMEM = "WAIT SIGNAL B%03u";
+static const char text_wait_motor[] PROGMEM = "WAIT MOTOR B%03u";
+static const char text_recording[] PROGMEM = "REC %02lu:%02lu B%03u";
+/* Exactly 16 columns: PAU mm:ss Bxxx <M|U>. */
+static const char text_paused[] PROGMEM = "PAU %02lu:%02lu B%03u %c";
+static const char text_saving[] PROGMEM = "SAVING %-9.9s";
+static const char text_please_wait[] PROGMEM = "PLEASE WAIT";
+static const char text_saved[] PROGMEM = "SAVED %-10.10s";
+static const char text_left_back[] PROGMEM = "LEFT = BACK";
+static const char text_file_deleted[] PROGMEM = "FILE DELETED";
+static const char text_rec_cancelled[] PROGMEM = "REC CANCELLED";
+static const char text_rec_error[] PROGMEM = "REC ERROR";
 
 static void line(uint8_t row, const char *text)
 {
     char output[17];
-    snprintf(output, sizeof(output), "%-16s", text != NULL ? text : "");
+    uint8_t length = 0U;
+
+    if (text != NULL)
+    {
+        while ((length < 16U) && (text[length] != '\0'))
+        {
+            output[length] = text[length];
+            ++length;
+        }
+    }
+    while (length < 16U) output[length++] = ' ';
+    output[16] = '\0';
     lcd_set_cursor(0, row);
     lcd_print(output);
+}
+
+static void copy_filename_line(char *destination, const char *filename)
+{
+    if ((filename == NULL) || (filename[0] == '\0'))
+    {
+        flash_text_copy(destination, 17U, text_rec_fallback);
+        return;
+    }
+    for (uint8_t i = 0U; i < 16U; ++i)
+    {
+        destination[i] = filename[i];
+        if (filename[i] == '\0') return;
+    }
+    destination[16] = '\0';
 }
 
 record_screen_action_t record_screen_handle_event(button_event_t event)
@@ -25,7 +64,6 @@ record_screen_action_t record_screen_handle_event(button_event_t event)
             return RECORD_SCREEN_ACTION_STOP_SAVE;
         case BUTTON_EVENT_LEFT_LONG:
             return RECORD_SCREEN_ACTION_CANCEL_BACK;
-        /* RIGHT short/long intentionally has no function while recording. */
         default:
             return RECORD_SCREEN_ACTION_NONE;
     }
@@ -37,67 +75,58 @@ void record_screen_render(void)
     const char *filename = record_engine_get_filename();
     char line0[17];
     char line1[17];
-    const char *mode = record_control_mode_label(record_engine_get_display_control_mode());
+    char filename_copy[17];
     uint32_t seconds = record_engine_get_elapsed_seconds();
+    char pause_indicator = record_engine_get_pause_indicator();
 
-    snprintf(line0, sizeof(line0), "REC %-12.12s", filename != NULL ? filename : "");
+    /* The actual RECxxxx filename deliberately remains in row 0 after MOTOR LOW. */
+    copy_filename_line(line0, filename);
+    copy_filename_line(filename_copy, filename);
 
     switch (state)
     {
         case RECORD_ENGINE_ARMED:
-            /* Keep the normal REC <future filename> identity on row 0.
-               Row 1 alone carries the armed/waiting transport state. */
-            if (record_engine_get_control_mode() == RECORD_CONTROL_AUTO)
-            {
-                snprintf(line1, sizeof(line1), "WAIT SIGNAL B%03u",
-                         (unsigned int)record_engine_get_buffer_fill_percent());
-            }
-            else
-            {
-                snprintf(line1, sizeof(line1), "WAIT MOTOR B%03u",
-                         (unsigned int)record_engine_get_buffer_fill_percent());
-            }
+            flash_text_snprintf(line1, sizeof(line1),
+                                (record_engine_get_control_mode() == RECORD_CONTROL_AUTO) ?
+                                text_wait_signal : text_wait_motor,
+                                (unsigned int)record_engine_get_buffer_fill_percent());
             break;
         case RECORD_ENGINE_RECORDING:
-            snprintf(line1, sizeof(line1), "REC %02lu:%02lu B%03u",
-                     (unsigned long)((seconds / 60UL) % 100UL),
-                     (unsigned long)(seconds % 60UL),
-                     (unsigned int)record_engine_get_buffer_fill_percent());
+            flash_text_snprintf(line1, sizeof(line1), text_recording,
+                                (unsigned long)((seconds / 60UL) % 100UL),
+                                (unsigned long)(seconds % 60UL),
+                                (unsigned int)record_engine_get_buffer_fill_percent());
             break;
         case RECORD_ENGINE_PAUSED:
-            snprintf(line1, sizeof(line1), "PAU %02lu:%02lu %-4s",
-                     (unsigned long)((seconds / 60UL) % 100UL),
-                     (unsigned long)(seconds % 60UL), mode);
+            flash_text_snprintf(line1, sizeof(line1), text_paused,
+                                (unsigned long)((seconds / 60UL) % 100UL),
+                                (unsigned long)(seconds % 60UL),
+                                (unsigned int)record_engine_get_buffer_fill_percent(),
+                                (pause_indicator == '\0') ? '?' : pause_indicator);
             break;
         case RECORD_ENGINE_FINALIZING:
-            snprintf(line0, sizeof(line0), "SAVING %-9.9s", filename != NULL ? filename : "");
-            snprintf(line1, sizeof(line1), "PLEASE WAIT");
+            flash_text_snprintf(line0, sizeof(line0), text_saving, filename_copy);
+            flash_text_copy(line1, sizeof(line1), text_please_wait);
             break;
         case RECORD_ENGINE_FINISHED:
-            snprintf(line0, sizeof(line0), "SAVED %-10.10s", filename != NULL ? filename : "");
-            snprintf(line1, sizeof(line1), "LEFT = BACK");
+            flash_text_snprintf(line0, sizeof(line0), text_saved, filename_copy);
+            flash_text_copy(line1, sizeof(line1), text_left_back);
             break;
         case RECORD_ENGINE_CANCELLED:
-            if (record_engine_cancelled_file_removed())
-            {
-                snprintf(line0, sizeof(line0), "FILE DELETED");
-            }
-            else
-            {
-                snprintf(line0, sizeof(line0), "REC CANCELLED");
-            }
-            snprintf(line1, sizeof(line1), "LEFT = BACK");
+            flash_text_copy(line0, sizeof(line0), record_engine_cancelled_file_removed() ?
+                            text_file_deleted : text_rec_cancelled);
+            flash_text_copy(line1, sizeof(line1), text_left_back);
             break;
         case RECORD_ENGINE_ERROR:
-            snprintf(line0, sizeof(line0), "REC ERROR");
-            snprintf(line1, sizeof(line1), "%.16s", record_engine_get_error_text());
+            flash_text_copy(line0, sizeof(line0), text_rec_error);
+            copy_filename_line(line1, record_engine_get_error_text());
             break;
         case RECORD_ENGINE_STOPPED:
         default:
-            snprintf(line1, sizeof(line1), "LEFT = BACK");
+            flash_text_copy(line1, sizeof(line1), text_left_back);
             break;
     }
 
-    line(0, line0);
-    line(1, line1);
+    line(0U, line0);
+    line(1U, line1);
 }

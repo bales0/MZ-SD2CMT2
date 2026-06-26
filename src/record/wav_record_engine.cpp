@@ -7,6 +7,7 @@
 #include "../drivers/wav_record_driver.h"
 #include "../streams/record_sample_stream.h"
 #include "../streams/wav_sample_stream.h"
+#include "../drivers/flash_text.h"
 
 #define WAV_RECORD_PATH_MAX 160U
 #define WAV_RECORD_FILENAME_MAX 16U
@@ -51,6 +52,11 @@ static void wav_record_set_error(const char *text)
     record_error_text[sizeof(record_error_text) - 1U] = '\0';
 }
 
+static void wav_record_set_error_P(PGM_P text)
+{
+    flash_text_copy(record_error_text, sizeof(record_error_text), text);
+}
+
 static void wav_record_put_le16(uint8_t *target, uint16_t value)
 {
     target[0] = (uint8_t)(value & 0xFFU);
@@ -76,26 +82,40 @@ static bool wav_record_make_paths(const char *directory_path)
         return false;
     }
 
-    length = snprintf(record_full_path, sizeof(record_full_path),
-                      "%s/REC%04u.WAV", directory_path,
-                      (unsigned int)sequence);
+    length = flash_text_snprintf(record_full_path, sizeof(record_full_path),
+                                 PSTR("%s/REC%04u.WAV"), directory_path,
+                                 (unsigned int)sequence);
 
     if ((length <= 0) || ((size_t)length >= sizeof(record_full_path)))
     {
-        wav_record_set_error("PATH TOO LONG");
+        wav_record_set_error_P(PSTR("PATH TOO LONG"));
         return false;
     }
 
-    snprintf(record_filename, sizeof(record_filename), "REC%04u.WAV",
-             (unsigned int)sequence);
+    flash_text_snprintf(record_filename, sizeof(record_filename),
+                        PSTR("REC%04u.WAV"), (unsigned int)sequence);
     return true;
 }
 
 static void wav_record_stop_close_error(const char *text)
 {
-    if (text != NULL)
+    /* Existing engine errors already live in this buffer; do not copy an
+       overlapping C string onto itself. */
+    if ((text != NULL) && (text != record_error_text))
     {
         wav_record_set_error(text);
+    }
+
+    wav_record_driver_stop();
+    sdcard_file_close();
+    record_state = WAV_RECORD_ENGINE_ERROR;
+}
+
+static void wav_record_stop_close_error_P(PGM_P text)
+{
+    if (text != NULL)
+    {
+        wav_record_set_error_P(text);
     }
 
     wav_record_driver_stop();
@@ -110,17 +130,26 @@ static bool wav_record_write_header(uint32_t data_bytes)
 
     if (file_bytes < WAV_RECORD_HEADER_BYTES)
     {
-        wav_record_set_error("WAV TOO BIG");
+        wav_record_set_error_P(PSTR("WAV TOO BIG"));
         return false;
     }
 
     memset(wav_record_work_block, 0, WAV_RECORD_HEADER_BYTES);
 
-    memcpy(wav_record_work_block + 0U, "RIFF", 4U);
+    wav_record_work_block[0U] = 'R';
+    wav_record_work_block[1U] = 'I';
+    wav_record_work_block[2U] = 'F';
+    wav_record_work_block[3U] = 'F';
     wav_record_put_le32(wav_record_work_block + 4U, file_bytes - 8UL);
-    memcpy(wav_record_work_block + 8U, "WAVE", 4U);
+    wav_record_work_block[8U] = 'W';
+    wav_record_work_block[9U] = 'A';
+    wav_record_work_block[10U] = 'V';
+    wav_record_work_block[11U] = 'E';
 
-    memcpy(wav_record_work_block + 12U, "fmt ", 4U);
+    wav_record_work_block[12U] = 'f';
+    wav_record_work_block[13U] = 'm';
+    wav_record_work_block[14U] = 't';
+    wav_record_work_block[15U] = ' ';
     wav_record_put_le32(wav_record_work_block + 16U, 16UL);
     wav_record_put_le16(wav_record_work_block + 20U, 1U);
     wav_record_put_le16(wav_record_work_block + 22U, 1U);
@@ -130,17 +159,23 @@ static bool wav_record_write_header(uint32_t data_bytes)
     wav_record_put_le16(wav_record_work_block + 34U, 8U);
 
     /* JUNK pads the standard data header so audio starts at sector 512. */
-    memcpy(wav_record_work_block + 36U, "JUNK", 4U);
+    wav_record_work_block[36U] = 'J';
+    wav_record_work_block[37U] = 'U';
+    wav_record_work_block[38U] = 'N';
+    wav_record_work_block[39U] = 'K';
     wav_record_put_le32(wav_record_work_block + 40U,
                         WAV_RECORD_JUNK_PAYLOAD_BYTES);
-    memcpy(wav_record_work_block + 504U, "data", 4U);
+    wav_record_work_block[504U] = 'd';
+    wav_record_work_block[505U] = 'a';
+    wav_record_work_block[506U] = 't';
+    wav_record_work_block[507U] = 'a';
     wav_record_put_le32(wav_record_work_block + 508U, data_bytes);
 
     if (!sdcard_file_seek(0UL) ||
         (sdcard_file_write(wav_record_work_block, WAV_RECORD_HEADER_BYTES) !=
          (int16_t)WAV_RECORD_HEADER_BYTES))
     {
-        wav_record_set_error("WAV HEADER ERR");
+        wav_record_set_error_P(PSTR("WAV HEADER ERR"));
         return false;
     }
 
@@ -157,7 +192,7 @@ static bool wav_record_expand_and_write(uint16_t raw_count)
 
     if ((raw_count == 0U) || (raw_count > WAV_RECORD_RAW_BLOCK_BYTES))
     {
-        wav_record_set_error("RAW BLOCK ERR");
+        wav_record_set_error_P(PSTR("RAW BLOCK ERR"));
         return false;
     }
 
@@ -180,7 +215,7 @@ static bool wav_record_expand_and_write(uint16_t raw_count)
     if (sdcard_file_write(wav_record_work_block, pcm_count) !=
         (int16_t)pcm_count)
     {
-        wav_record_set_error("WAV WRITE ERR");
+        wav_record_set_error_P(PSTR("WAV WRITE ERR"));
         return false;
     }
 
@@ -247,7 +282,7 @@ static bool wav_record_write_final_tail(void)
     if (sdcard_file_write(wav_record_work_block, final_tail_bits) !=
         (int16_t)final_tail_bits)
     {
-        wav_record_set_error("TAIL WRITE ERR");
+        wav_record_set_error_P(PSTR("TAIL WRITE ERR"));
         return false;
     }
 
@@ -265,7 +300,7 @@ static bool wav_record_finalize_file(void)
 
         if (sdcard_file_write(wav_record_work_block, 1U) != 1)
         {
-            wav_record_set_error("WAV PAD ERR");
+            wav_record_set_error_P(PSTR("WAV PAD ERR"));
             return false;
         }
 
@@ -278,7 +313,7 @@ static bool wav_record_finalize_file(void)
     {
         if (record_error_text[0] == '\0')
         {
-            wav_record_set_error("WAV CLOSE ERR");
+            wav_record_set_error_P(PSTR("WAV CLOSE ERR"));
         }
         return false;
     }
@@ -316,7 +351,7 @@ bool wav_record_engine_start(const char *directory_path,
 
     if (!sdcard_is_mounted())
     {
-        wav_record_set_error("SD CARD ERROR");
+        wav_record_set_error_P(PSTR("SD CARD ERROR"));
         record_state = WAV_RECORD_ENGINE_ERROR;
         return false;
     }
@@ -326,7 +361,7 @@ bool wav_record_engine_start(const char *directory_path,
 
     if (!wav_record_driver_prepare(sample_rate))
     {
-        wav_record_set_error("BAD REC RATE");
+        wav_record_set_error_P(PSTR("BAD REC RATE"));
         record_state = WAV_RECORD_ENGINE_ERROR;
         return false;
     }
@@ -341,7 +376,7 @@ bool wav_record_engine_start(const char *directory_path,
 
     if (!sdcard_file_open_write(record_full_path))
     {
-        wav_record_set_error("WAV CREATE ERR");
+        wav_record_set_error_P(PSTR("WAV CREATE ERR"));
         record_state = WAV_RECORD_ENGINE_ERROR;
         return false;
     }
@@ -353,7 +388,7 @@ bool wav_record_engine_start(const char *directory_path,
     */
     if (!sdcard_file_preallocate(WAV_RECORD_PREALLOCATE_PCM_BYTES))
     {
-        wav_record_stop_close_error("PREALLOC FAIL");
+        wav_record_stop_close_error_P(PSTR("PREALLOC FAIL"));
         return false;
     }
 
@@ -368,7 +403,7 @@ bool wav_record_engine_start(const char *directory_path,
 
     if (!wav_record_driver_start())
     {
-        wav_record_stop_close_error("REC TIMER ERR");
+        wav_record_stop_close_error_P(PSTR("REC TIMER ERR"));
         return false;
     }
 
@@ -428,7 +463,7 @@ void wav_record_engine_service(void)
     {
         if (wav_record_driver_get_state() == WAV_RECORD_DRIVER_OVERRUN)
         {
-            wav_record_stop_close_error("REC OVERFLOW");
+            wav_record_stop_close_error_P(PSTR("REC OVERFLOW"));
             return;
         }
 

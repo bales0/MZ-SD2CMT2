@@ -7,6 +7,7 @@
 #include "../drivers/sdcard.h"
 #include "../streams/wav_sample_stream.h"
 #include "../streams/cmt_mode_scratch.h"
+#include "../drivers/flash_text.h"
 
 #define EDGE_RECORD_PATH_MAX 160U
 #define EDGE_RECORD_FILENAME_MAX 16U
@@ -20,8 +21,15 @@ typedef enum
 {
     EDGE_PARSE_NORMAL = 0,
     EDGE_PARSE_UNIT,
-    EDGE_PARSE_LONG
+    EDGE_PARSE_LONG_TAIL
 } edge_parse_state_t;
+
+typedef enum
+{
+    EDGE_PATCH_DONE = 0,
+    EDGE_PATCH_WAIT,
+    EDGE_PATCH_ERROR
+} edge_patch_result_t;
 
 static edge_record_engine_state_t record_state = EDGE_RECORD_ENGINE_STOPPED;
 static file_format_t record_format = FILE_FORMAT_UNKNOWN;
@@ -34,22 +42,36 @@ static uint16_t stage_count[2];
 static bool stage_ready[2];
 static uint8_t stage_fill_index = 0U;
 static uint8_t stage_write_index = 0U;
+static uint32_t stage_base_offset[2];
 static uint32_t final_bytes_written = 0UL;
+/* Logical output position, including staged bytes not yet transmitted to SD. */
+static uint32_t output_bytes_emitted = 0UL;
 
 /* Driver token parser. */
 static edge_parse_state_t parse_state = EDGE_PARSE_NORMAL;
-static uint8_t parse_bytes_needed = 0U;
-static uint8_t parse_shift = 0U;
-static uint32_t parse_long_units = 0UL;
 static uint8_t parse_pending_short_units = 0U;
 
-/* Standard LEP/L16 stream emitter. */
+/* Short 1..127-unit normal output interval. */
 static uint8_t output_level = 0U;
 static bool output_interval_active = false;
-static bool output_first_pending = false;
-static uint32_t output_zero_count = 0UL;
-static uint32_t output_interval_units = 0UL;
+static uint8_t output_interval_units = 0U;
 static uint8_t output_interval_level = 0U;
+
+/*
+   One long physical level is encoded progressively. The first 127-unit block
+   remains held. On the second and every subsequent block a zero extension is
+   guaranteed, so it can be written immediately. The first signed byte starts
+   as +/-1 and is patched to the final remainder at the trailing edge.
+*/
+static bool output_long_active = false;
+static uint8_t output_long_level = 0U;
+static bool output_long_placeholder_emitted = false;
+static uint32_t output_long_placeholder_offset = 0UL;
+static bool output_long_start_pending = false;
+static bool output_long_zero_pending = false;
+static bool output_long_tail_pending = false;
+static int8_t output_long_tail_units = 0;
+static bool output_long_close_after_zero = false;
 
 static uint8_t *edge_stage_buffer(uint8_t index)
 {
@@ -60,15 +82,16 @@ static void edge_record_set_error(const char *text)
 {
     if (text == NULL)
     {
-        text = "EDGE ERROR";
+        flash_text_copy(record_error_text, sizeof(record_error_text), PSTR("EDGE ERROR"));
+        return;
     }
     strncpy(record_error_text, text, sizeof(record_error_text) - 1U);
     record_error_text[sizeof(record_error_text) - 1U] = '\0';
 }
 
-static const char *edge_record_extension(void)
+static void edge_record_set_error_P(PGM_P text)
 {
-    return (record_format == FILE_FORMAT_L16) ? "L16" : "LEP";
+    flash_text_copy(record_error_text, sizeof(record_error_text), text);
 }
 
 static bool edge_record_make_paths(const char *directory_path)
@@ -82,18 +105,30 @@ static bool edge_record_make_paths(const char *directory_path)
         return false;
     }
 
-    length = snprintf(record_full_path, sizeof(record_full_path),
-                      "%s/REC%04u.%s", directory_path,
-                      (unsigned int)sequence, edge_record_extension());
+    length = (record_format == FILE_FORMAT_L16) ?
+        flash_text_snprintf(record_full_path, sizeof(record_full_path),
+                            PSTR("%s/REC%04u.L16"), directory_path,
+                            (unsigned int)sequence) :
+        flash_text_snprintf(record_full_path, sizeof(record_full_path),
+                            PSTR("%s/REC%04u.LEP"), directory_path,
+                            (unsigned int)sequence);
 
     if ((length <= 0) || ((size_t)length >= sizeof(record_full_path)))
     {
-        edge_record_set_error("PATH TOO LONG");
+        edge_record_set_error_P(PSTR("PATH TOO LONG"));
         return false;
     }
 
-    snprintf(record_filename, sizeof(record_filename), "REC%04u.%s",
-             (unsigned int)sequence, edge_record_extension());
+    if (record_format == FILE_FORMAT_L16)
+    {
+        flash_text_snprintf(record_filename, sizeof(record_filename),
+                            PSTR("REC%04u.L16"), (unsigned int)sequence);
+    }
+    else
+    {
+        flash_text_snprintf(record_filename, sizeof(record_filename),
+                            PSTR("REC%04u.LEP"), (unsigned int)sequence);
+    }
     return true;
 }
 
@@ -115,13 +150,13 @@ static bool edge_record_write_one_ready_stage(void)
     count = stage_count[index];
     if ((count == 0U) || (count > EDGE_RECORD_STAGE_BYTES))
     {
-        edge_record_set_error("STAGE ERROR");
+        edge_record_set_error_P(PSTR("STAGE ERROR"));
         return false;
     }
 
     if (sdcard_file_write(edge_stage_buffer(index), count) != (int16_t)count)
     {
-        edge_record_set_error("EDGE WRITE");
+        edge_record_set_error_P(PSTR("EDGE WRITE"));
         return false;
     }
 
@@ -141,7 +176,14 @@ static bool edge_record_emit_byte(uint8_t value)
         return false;
     }
 
+    if (stage_count[index] == 0U)
+    {
+        stage_base_offset[index] = output_bytes_emitted;
+    }
+
     edge_stage_buffer(index)[stage_count[index]++] = value;
+    output_bytes_emitted++;
+
     if (stage_count[index] == EDGE_RECORD_STAGE_BYTES)
     {
         stage_ready[index] = true;
@@ -150,64 +192,230 @@ static bool edge_record_emit_byte(uint8_t value)
     return true;
 }
 
-/* Start expansion of one full logical level interval. */
-static bool edge_record_begin_interval(uint32_t units)
+static uint8_t edge_record_signed_slot(uint8_t level, uint8_t units)
 {
-    if (units == 0UL)
+    return level ? units : (uint8_t)(-(int16_t)units);
+}
+
+/* Start output of one short 1..127-unit level. */
+static bool edge_record_begin_interval(uint8_t units)
+{
+    if ((units == 0U) || (units > 127U))
     {
-        edge_record_set_error("BAD TOKEN");
+        edge_record_set_error_P(PSTR("BAD TOKEN"));
         return false;
     }
 
     output_interval_units = units;
     output_interval_level = output_level;
     output_level ^= 1U;
-    output_first_pending = true;
-    output_zero_count = 0UL;
     output_interval_active = true;
     return true;
 }
 
-/*
-   Write valid LEP/L16 bytes directly to the final file staging area:
-     duration N = signed remainder 1..127 followed by zero extensions.
-*/
 static bool edge_record_emit_active_interval(void)
 {
-    while (output_interval_active)
+    if (!output_interval_active)
     {
-        if (output_first_pending)
+        return true;
+    }
+
+    if (!edge_record_emit_byte(edge_record_signed_slot(output_interval_level,
+                                                        output_interval_units)))
+    {
+        return true;
+    }
+
+    output_interval_active = false;
+    return true;
+}
+
+static bool edge_record_long_has_pending_output(void)
+{
+    return output_long_start_pending || output_long_zero_pending ||
+           output_long_tail_pending;
+}
+
+static void edge_record_finish_long_interval(void)
+{
+    output_level ^= 1U;
+    output_long_active = false;
+    output_long_level = 0U;
+    output_long_placeholder_emitted = false;
+    output_long_placeholder_offset = 0UL;
+    output_long_start_pending = false;
+    output_long_zero_pending = false;
+    output_long_tail_pending = false;
+    output_long_tail_units = 0;
+    output_long_close_after_zero = false;
+}
+
+/*
+   Patch a placeholder in RAM when it has not been written yet. Otherwise do a
+   single foreground seek/write/seek transaction, restoring the append point.
+*/
+static edge_patch_result_t edge_record_patch_output_byte(uint32_t offset,
+                                                         uint8_t value)
+{
+    uint8_t index;
+
+    for (index = 0U; index < 2U; ++index)
+    {
+        uint32_t base = stage_base_offset[index];
+        uint32_t end = base + (uint32_t)stage_count[index];
+
+        if ((stage_count[index] != 0U) && (offset >= base) && (offset < end))
         {
-            uint32_t zero_count = (output_interval_units - 1UL) / 127UL;
-            uint32_t first_units = output_interval_units - zero_count * 127UL;
-            int8_t first = output_interval_level ? (int8_t)first_units :
-                (int8_t)(-(int16_t)first_units);
+            edge_stage_buffer(index)[(uint16_t)(offset - base)] = value;
+            return EDGE_PATCH_DONE;
+        }
+    }
 
-            if (!edge_record_emit_byte((uint8_t)first))
-            {
-                return true;
-            }
+    if (offset >= final_bytes_written)
+    {
+        edge_record_set_error_P(PSTR("PATCH LOST"));
+        return EDGE_PATCH_ERROR;
+    }
 
-            output_zero_count = zero_count;
-            output_first_pending = false;
-            if (output_zero_count == 0UL)
-            {
-                output_interval_active = false;
-            }
-            continue;
+    if (sdcard_file_is_busy())
+    {
+        return EDGE_PATCH_WAIT;
+    }
+
+    if (!sdcard_file_seek(offset) ||
+        (sdcard_file_write(&value, 1U) != 1) ||
+        !sdcard_file_seek(final_bytes_written))
+    {
+        edge_record_set_error_P(PSTR("PATCH WRITE"));
+        return EDGE_PATCH_ERROR;
+    }
+
+    return EDGE_PATCH_DONE;
+}
+
+/* Called when one exact 127-unit CTC block token is consumed. */
+static bool edge_record_accept_long_block(void)
+{
+    if (!output_long_active)
+    {
+        output_long_active = true;
+        output_long_level = output_level;
+        output_long_placeholder_emitted = false;
+        output_long_start_pending = false;
+        output_long_zero_pending = false;
+        output_long_tail_pending = false;
+        output_long_close_after_zero = false;
+        return true;
+    }
+
+    /* The previous 127-unit block is now guaranteed to be a zero extension. */
+    if (!output_long_placeholder_emitted)
+    {
+        output_long_start_pending = true;
+    }
+    else
+    {
+        output_long_zero_pending = true;
+    }
+    return true;
+}
+
+/* t belongs to -1..127 and completes the current long physical level. */
+static bool edge_record_accept_long_tail(int8_t tail_units)
+{
+    if (!output_long_active || (tail_units < -1))
+    {
+        edge_record_set_error_P(PSTR("BAD TOKEN"));
+        return false;
+    }
+
+    output_long_tail_units = tail_units;
+    output_long_tail_pending = true;
+    return true;
+}
+
+/*
+   Emit any pending progressive long-level action. A false byte emission means
+   that both staging sectors are temporarily occupied, so the caller yields
+   until the normal SD service has released one; it is not an error.
+*/
+static bool edge_record_service_long_output(void)
+{
+    if (!output_long_active)
+    {
+        return true;
+    }
+
+    if (output_long_start_pending)
+    {
+        uint32_t offset = output_bytes_emitted;
+
+        if (!edge_record_emit_byte(edge_record_signed_slot(output_long_level, 1U)))
+        {
+            return true;
         }
 
+        output_long_placeholder_offset = offset;
+        output_long_placeholder_emitted = true;
+        output_long_start_pending = false;
+        output_long_zero_pending = true;
+        return true;
+    }
+
+    if (output_long_zero_pending)
+    {
         if (!edge_record_emit_byte(0U))
         {
             return true;
         }
 
-        output_zero_count--;
-        if (output_zero_count == 0UL)
+        output_long_zero_pending = false;
+        if (output_long_close_after_zero)
         {
-            output_interval_active = false;
+            edge_record_finish_long_interval();
         }
+        return true;
     }
+
+    if (output_long_tail_pending)
+    {
+        int8_t tail = output_long_tail_units;
+        uint8_t remainder = (tail <= 0) ? (uint8_t)(127 + tail) :
+            (uint8_t)tail;
+        bool final_zero = (tail > 0);
+        uint8_t slot = edge_record_signed_slot(output_long_level, remainder);
+
+        if (output_long_placeholder_emitted)
+        {
+            edge_patch_result_t patch = edge_record_patch_output_byte(
+                output_long_placeholder_offset, slot);
+
+            if (patch == EDGE_PATCH_WAIT)
+            {
+                return true;
+            }
+            if (patch == EDGE_PATCH_ERROR)
+            {
+                return false;
+            }
+        }
+        else if (!edge_record_emit_byte(slot))
+        {
+            return true;
+        }
+
+        output_long_tail_pending = false;
+        if (final_zero)
+        {
+            output_long_zero_pending = true;
+            output_long_close_after_zero = true;
+            return true;
+        }
+
+        edge_record_finish_long_interval();
+        return true;
+    }
+
     return true;
 }
 
@@ -231,11 +439,24 @@ static bool edge_record_pump_fifo_to_standard_output(void)
             continue;
         }
 
+        if (edge_record_long_has_pending_output())
+        {
+            if (!edge_record_service_long_output())
+            {
+                return false;
+            }
+            if (edge_record_long_has_pending_output())
+            {
+                return true;
+            }
+            continue;
+        }
+
         if (parse_pending_short_units != 0U)
         {
             uint8_t units = parse_pending_short_units;
             parse_pending_short_units = 0U;
-            if (!edge_record_begin_interval((uint32_t)units))
+            if (!edge_record_begin_interval(units))
             {
                 return false;
             }
@@ -251,26 +472,20 @@ static bool edge_record_pump_fifo_to_standard_output(void)
         {
             parse_state = EDGE_PARSE_NORMAL;
             if ((value < 16U) || (value > 127U) ||
-                !edge_record_begin_interval((uint32_t)value))
+                !edge_record_begin_interval(value))
             {
-                edge_record_set_error("BAD TOKEN");
+                edge_record_set_error_P(PSTR("BAD TOKEN"));
                 return false;
             }
             continue;
         }
 
-        if (parse_state == EDGE_PARSE_LONG)
+        if (parse_state == EDGE_PARSE_LONG_TAIL)
         {
-            parse_long_units |= ((uint32_t)value << parse_shift);
-            parse_shift = (uint8_t)(parse_shift + 8U);
-            parse_bytes_needed--;
-            if (parse_bytes_needed == 0U)
+            parse_state = EDGE_PARSE_NORMAL;
+            if (!edge_record_accept_long_tail((int8_t)value))
             {
-                parse_state = EDGE_PARSE_NORMAL;
-                if (!edge_record_begin_interval(parse_long_units))
-                {
-                    return false;
-                }
+                return false;
             }
             continue;
         }
@@ -281,12 +496,18 @@ static bool edge_record_pump_fifo_to_standard_output(void)
             continue;
         }
 
-        if (value == EDGE_RECORD_TOKEN_LONG)
+        if (value == EDGE_RECORD_TOKEN_LONG_BLOCK)
         {
-            parse_state = EDGE_PARSE_LONG;
-            parse_bytes_needed = 4U;
-            parse_shift = 0U;
-            parse_long_units = 0UL;
+            if (!edge_record_accept_long_block())
+            {
+                return false;
+            }
+            continue;
+        }
+
+        if (value == EDGE_RECORD_TOKEN_LONG_TAIL)
+        {
+            parse_state = EDGE_PARSE_LONG_TAIL;
             continue;
         }
 
@@ -296,11 +517,11 @@ static bool edge_record_pump_fifo_to_standard_output(void)
 
             if (first == 0U)
             {
-                edge_record_set_error("BAD TOKEN");
+                edge_record_set_error_P(PSTR("BAD TOKEN"));
                 return false;
             }
 
-            if (!edge_record_begin_interval((uint32_t)first))
+            if (!edge_record_begin_interval(first))
             {
                 return false;
             }
@@ -319,7 +540,8 @@ static bool edge_record_output_drained(void)
     return (edge_record_driver_available_bytes() == 0U) &&
            (parse_state == EDGE_PARSE_NORMAL) &&
            (parse_pending_short_units == 0U) &&
-           !output_interval_active;
+           !output_interval_active && !output_long_active &&
+           !edge_record_long_has_pending_output();
 }
 
 static void edge_record_mark_output_tail_ready(void)
@@ -335,9 +557,27 @@ static void edge_record_mark_output_tail_ready(void)
 
 static void edge_record_fail_close(const char *text)
 {
-    if (text != NULL)
+    /* Existing engine errors already live in this buffer; do not copy an
+       overlapping C string onto itself. */
+    if ((text != NULL) && (text != record_error_text))
     {
         edge_record_set_error(text);
+    }
+
+    edge_record_driver_abort();
+    sdcard_file_close();
+    if (record_full_path[0] != '\0')
+    {
+        (void)sdcard_file_remove(record_full_path);
+    }
+    record_state = EDGE_RECORD_ENGINE_ERROR;
+}
+
+static void edge_record_fail_close_P(PGM_P text)
+{
+    if (text != NULL)
+    {
+        edge_record_set_error_P(text);
     }
 
     edge_record_driver_abort();
@@ -363,18 +603,25 @@ void edge_record_engine_init(void)
     stage_ready[1] = false;
     stage_fill_index = 0U;
     stage_write_index = 0U;
+    stage_base_offset[0] = 0UL;
+    stage_base_offset[1] = 0UL;
     final_bytes_written = 0UL;
+    output_bytes_emitted = 0UL;
     parse_state = EDGE_PARSE_NORMAL;
-    parse_bytes_needed = 0U;
-    parse_shift = 0U;
-    parse_long_units = 0UL;
     parse_pending_short_units = 0U;
     output_level = 0U;
     output_interval_active = false;
-    output_first_pending = false;
-    output_zero_count = 0UL;
-    output_interval_units = 0UL;
+    output_interval_units = 0U;
     output_interval_level = 0U;
+    output_long_active = false;
+    output_long_level = 0U;
+    output_long_placeholder_emitted = false;
+    output_long_placeholder_offset = 0UL;
+    output_long_start_pending = false;
+    output_long_zero_pending = false;
+    output_long_tail_pending = false;
+    output_long_tail_units = 0;
+    output_long_close_after_zero = false;
 }
 
 bool edge_record_engine_preview_filename(const char *directory_path,
@@ -382,7 +629,7 @@ bool edge_record_engine_preview_filename(const char *directory_path,
 {
     if ((format != FILE_FORMAT_LEP) && (format != FILE_FORMAT_L16))
     {
-        edge_record_set_error("REC FORMAT");
+        edge_record_set_error_P(PSTR("REC FORMAT"));
         return false;
     }
 
@@ -398,13 +645,13 @@ bool edge_record_engine_start(const char *directory_path, file_format_t format)
 
     if ((format != FILE_FORMAT_LEP) && (format != FILE_FORMAT_L16))
     {
-        edge_record_set_error("EDGE FORMAT");
+        edge_record_set_error_P(PSTR("EDGE FORMAT"));
         record_state = EDGE_RECORD_ENGINE_ERROR;
         return false;
     }
     if (!sdcard_is_mounted())
     {
-        edge_record_set_error("SD CARD ERROR");
+        edge_record_set_error_P(PSTR("SD CARD ERROR"));
         record_state = EDGE_RECORD_ENGINE_ERROR;
         return false;
     }
@@ -420,7 +667,7 @@ bool edge_record_engine_start(const char *directory_path, file_format_t format)
     }
     if (!sdcard_file_open_write(record_full_path))
     {
-        edge_record_set_error("EDGE CREATE");
+        edge_record_set_error_P(PSTR("EDGE CREATE"));
         record_state = EDGE_RECORD_ENGINE_ERROR;
         return false;
     }
@@ -429,13 +676,13 @@ bool edge_record_engine_start(const char *directory_path, file_format_t format)
     if (!sdcard_file_preallocate(EDGE_RECORD_FINAL_PREALLOCATE_BYTES) ||
         !sdcard_file_seek(0UL) || !sdcard_file_sync())
     {
-        edge_record_fail_close("PREALLOC FAIL");
+        edge_record_fail_close_P(PSTR("PREALLOC FAIL"));
         return false;
     }
 
     if (!edge_record_driver_start())
     {
-        edge_record_fail_close("EDGE START");
+        edge_record_fail_close_P(PSTR("EDGE START"));
         return false;
     }
 
@@ -477,15 +724,9 @@ void edge_record_engine_request_stop(void)
     edge_record_driver_stop();
     if (edge_record_driver_get_state() == EDGE_RECORD_DRIVER_OVERRUN)
     {
-        edge_record_fail_close("EDGE OVERFLOW");
+        edge_record_fail_close_P(PSTR("EDGE OVERFLOW"));
         return;
     }
-    if (edge_record_driver_get_state() == EDGE_RECORD_DRIVER_TOO_LONG)
-    {
-        edge_record_fail_close("EDGE TOO LONG");
-        return;
-    }
-
     record_state = EDGE_RECORD_ENGINE_FINALIZING;
 }
 
@@ -509,15 +750,9 @@ void edge_record_engine_service(void)
     {
         if (driver_state == EDGE_RECORD_DRIVER_OVERRUN)
         {
-            edge_record_fail_close("EDGE OVERFLOW");
+            edge_record_fail_close_P(PSTR("EDGE OVERFLOW"));
             return;
         }
-        if (driver_state == EDGE_RECORD_DRIVER_TOO_LONG)
-        {
-            edge_record_fail_close("EDGE TOO LONG");
-            return;
-        }
-
         if (!edge_record_write_one_ready_stage() ||
             !edge_record_pump_fifo_to_standard_output())
         {
@@ -557,9 +792,10 @@ void edge_record_engine_service(void)
         return;
     }
 
-    if (!sdcard_file_truncate(final_bytes_written) || !sdcard_file_sync())
+    if ((output_bytes_emitted != final_bytes_written) ||
+        !sdcard_file_truncate(final_bytes_written) || !sdcard_file_sync())
     {
-        edge_record_fail_close("EDGE CLOSE");
+        edge_record_fail_close_P(PSTR("EDGE CLOSE"));
         return;
     }
 

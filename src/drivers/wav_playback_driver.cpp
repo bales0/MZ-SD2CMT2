@@ -32,7 +32,6 @@ static uint16_t timer_phase_ticks = 0U;
 static uint8_t cached_output_byte = 0U;
 static uint8_t cached_output_bits = 0U;
 
-static volatile uint16_t emitted_sequence = 0U;
 
 static inline __attribute__((always_inline))
 void wav_playback_schedule_period_from_isr(void)
@@ -126,7 +125,6 @@ bool wav_playback_emit_one_sample_from_isr(void)
     */
     mz_read_set_fast_from_isr(level);
 
-    emitted_sequence = (uint16_t)(emitted_sequence + 1U);
     return true;
 }
 
@@ -164,7 +162,6 @@ void wav_playback_driver_init(void)
     timer_phase_ticks = 0U;
     cached_output_byte = 0U;
     cached_output_bits = 0U;
-    emitted_sequence = 0U;
     driver_state = WAV_PLAYBACK_DRIVER_STOPPED;
 }
 
@@ -199,7 +196,6 @@ bool wav_playback_driver_prepare(uint32_t sample_rate)
         timer_phase_ticks = 0U;
         cached_output_byte = 0U;
         cached_output_bits = 0U;
-        emitted_sequence = 0U;
         driver_state = WAV_PLAYBACK_DRIVER_READY;
     }
 
@@ -270,7 +266,6 @@ void wav_playback_driver_stop(void)
         driver_state = WAV_PLAYBACK_DRIVER_STOPPED;
         cached_output_byte = 0U;
         cached_output_bits = 0U;
-        emitted_sequence = 0U;
     }
 }
 
@@ -289,17 +284,6 @@ uint8_t wav_playback_driver_get_read_pin(void)
     return mzio_read_pin();
 }
 
-uint16_t wav_playback_driver_get_emitted_sequence(void)
-{
-    uint16_t sequence;
-
-    ATOMIC_BLOCK(ATOMIC_RESTORESTATE)
-    {
-        sequence = emitted_sequence;
-    }
-
-    return sequence;
-}
 
 uint16_t wav_playback_driver_get_jitter_ticks(void)
 {

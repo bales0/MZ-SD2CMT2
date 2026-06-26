@@ -27,7 +27,10 @@ void edge_playback_service(void);
 edge_playback_state_t edge_playback_get_state(void);
 const char *edge_playback_get_error_text(void);
 uint8_t edge_playback_get_buffer_fill_percent(void);
+
+/* Byte-accurate source progress derived in foreground from bytes read minus FIFO. */
 uint32_t edge_playback_get_consumed_bytes(void);
 uint32_t edge_playback_get_total_bytes(void);
+uint8_t edge_playback_get_progress_percent(void);
 
 #endif

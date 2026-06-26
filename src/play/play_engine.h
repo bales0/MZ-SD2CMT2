@@ -17,7 +17,6 @@ typedef struct
 {
     const char *full_path;
     file_format_t format;
-    menu_play_mode_t play_mode;
     bool invert_signal;
 } play_engine_config_t;
 
@@ -32,20 +31,20 @@ void play_engine_stop(void);
 void play_engine_service(void);
 
 play_engine_state_t play_engine_get_state(void);
-
 const char *play_engine_get_error_text(void);
-
 uint8_t play_engine_get_output_pin(void);
 
-/* WAV playback progress, measured in emitted source sample periods. */
-uint32_t play_engine_get_played_samples(void);
-uint32_t play_engine_get_total_samples(void);
+/* Active transport time excludes manual and MOTOR pauses. */
+uint32_t play_engine_get_elapsed_ms(void);
+
+/* Nominal transmitted duration of WAV/MZF/MZT/M12, excluding MOTOR pauses. */
+uint32_t play_engine_get_total_duration_ms(void);
+
+/* Byte-based progress for LEP/L16. Other formats return zero here. */
+uint8_t play_engine_get_progress_percent(void);
 
 /* Current prepared FIFO fill, as 0..100 %. */
 uint8_t play_engine_get_buffer_fill_percent(void);
 
-/*
-    Software jitter statistics are disabled in the sample ISR. D11/OC1A timing
-    marker is the accurate jitter probe; this accessor remains for UI ABI.
-*/
+/* Software jitter statistics are disabled in the sample ISR. */
 uint16_t play_engine_get_jitter_ticks(void);

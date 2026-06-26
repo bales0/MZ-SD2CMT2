@@ -18,4 +18,3 @@ typedef enum
 bool file_format_is_sharp_tape(file_format_t format);
 
 file_format_t file_format_detect_from_name(const char *filename);
-const char* file_format_to_label(file_format_t format);

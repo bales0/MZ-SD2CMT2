@@ -11,28 +11,31 @@ typedef enum
     EDGE_RECORD_DRIVER_RUNNING,
     EDGE_RECORD_DRIVER_PAUSED,
     EDGE_RECORD_DRIVER_OVERRUN,
-    EDGE_RECORD_DRIVER_TOO_LONG,
     EDGE_RECORD_DRIVER_BAD_ARGUMENT
 } edge_record_driver_state_t;
 
 /*
    Internal ISR-to-foreground stream. It is never written directly to a
-   .LEP/.L16 file. The foreground immediately expands it to normal standard
-   signed slots and writes those slots into the final file.
+   .LEP/.L16 file. The foreground expands it to normal signed LEP/L16 slots.
 
    0x10..0xFF: high nibble = one 1..15-unit interval, low nibble = optional
                second 1..15-unit interval. Polarity is implicit because each
                accepted WRITE transition changes the signal polarity.
    0x01,u:     one 16..127-unit interval.
-   0x02,u0..u3: one interval larger than 127 units, little-endian uint32.
+   0x02:       one elapsed block of exactly 127 output units in the current
+               unchanged WRITE level.
+   0x03,t:     end of that long level. t is signed -1..127 residual output
+               units after the complete 127-unit blocks.
 
-   The normal 5 kHz paths use only packed nibbles. Long tokens occur only for
-   slow pulses and are expanded to a signed slot followed by zero-extension
-   bytes directly while RECORD is still active.
+   Timer5 is CTC-ticked every 127 format units. This keeps only one pending
+   127-unit block, not a whole no-edge duration: the foreground emits standard
+   zero extensions as the level continues and adjusts the first signed slot
+   after the trailing edge. No Timer5 overflow accumulator is used.
 */
 #define EDGE_RECORD_TOKEN_UNIT 0x01U
-#define EDGE_RECORD_TOKEN_LONG 0x02U
-#define EDGE_RECORD_TOKEN_LONG_BYTES 5U
+#define EDGE_RECORD_TOKEN_LONG_BLOCK 0x02U
+#define EDGE_RECORD_TOKEN_LONG_TAIL 0x03U
+#define EDGE_RECORD_TOKEN_LONG_TAIL_BYTES 2U
 
 void edge_record_driver_init(void);
 bool edge_record_driver_prepare(uint8_t unit_us);
@@ -49,7 +52,6 @@ edge_record_driver_state_t edge_record_driver_get_state(void);
 uint16_t edge_record_driver_available_bytes(void);
 bool edge_record_driver_pop_byte(uint8_t *value);
 uint8_t edge_record_driver_fill_percent(void);
-uint32_t edge_record_driver_get_captured_active_ticks(void);
 uint8_t edge_record_driver_get_initial_level(void);
 
 #endif

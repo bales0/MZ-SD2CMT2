@@ -1,5 +1,6 @@
 #include "edge_playback.h"
 #include "mzf_playback.h"
+#include "timer3b_owner.h"
 
 #include <Arduino.h>
 #include <avr/io.h>
@@ -8,6 +9,7 @@
 #include <string.h>
 
 #include "../drivers/mzio.h"
+#include "../drivers/flash_text.h"
 #include "../drivers/sdcard.h"
 #include "../streams/wav_sample_stream.h"
 
@@ -20,30 +22,39 @@
 #define EDGE_FIFO_MASK (EDGE_FIFO_BYTES - 1U)
 #define EDGE_WORK_BYTES WAV_SAMPLE_STREAM_REFILL_BLOCK
 
+/*
+    LEP: 50 us = 800 Timer3 ticks.  A 127-unit interval is 101600 ticks,
+    so it is emitted as 60000 + at most 41600 ticks.  L16: 16 us = 256 ticks,
+    therefore every encoded interval fits in one 16-bit compare period.
+*/
+#define EDGE_LEP_UNIT_TICKS 800U
+#define EDGE_L16_UNIT_TICKS 256U
+#define EDGE_LEP_FIRST_CHUNK_UNITS 75U
+#define EDGE_LEP_FIRST_CHUNK_TICKS 60000U
+
 static volatile uint16_t edge_read_sequence = 0U;
 static volatile uint16_t edge_write_sequence = 0U;
 static volatile uint8_t edge_source_finished = 1U;
 static volatile uint8_t edge_state = EDGE_PLAYBACK_STOPPED;
 
-static uint8_t edge_unit_us = 50U;
-static uint16_t edge_unit_ticks = 800U;
+static bool edge_is_l16 = false;
 static bool edge_invert = false;
-static uint32_t edge_paused_remaining_ticks = 0UL;
-/* Timer3 compare is 16-bit: a source slot may be split into safe chunks. */
-static uint32_t edge_slot_remaining_ticks = 0UL;
-#define EDGE_TIMER_MAX_CHUNK_TICKS 60000UL
+
+/* Remaining part of the current source interval after its first compare chunk. */
+static uint16_t edge_slot_tail_ticks = 0U;
+
+/* Pause retains at most two 16-bit chunks, never a 32-bit tick count. */
+static uint16_t edge_paused_current_ticks = 0U;
+static uint16_t edge_paused_tail_ticks = 0U;
+
 static uint32_t edge_total_bytes = 0UL;
-static volatile uint32_t edge_consumed_bytes = 0UL;
+/* Foreground-only count of source bytes already copied from SD into the FIFO. */
+static uint32_t edge_source_bytes_read = 0UL;
 static char edge_error_text[17];
 
-static void edge_set_error(const char *text, edge_playback_state_t state)
+static void edge_set_error_P(PGM_P text, edge_playback_state_t state)
 {
-    if (text == NULL)
-    {
-        text = "EDGE ERROR";
-    }
-    strncpy(edge_error_text, text, sizeof(edge_error_text) - 1U);
-    edge_error_text[sizeof(edge_error_text) - 1U] = '\0';
+    flash_text_copy(edge_error_text, sizeof(edge_error_text), text);
     edge_state = (uint8_t)state;
 }
 
@@ -68,7 +79,6 @@ static bool edge_pop_from_isr(int8_t *value)
     }
     *value = (int8_t)wav_sample_stream_isr_bytes[r & EDGE_FIFO_MASK];
     edge_read_sequence = (uint16_t)(r + 1U);
-    edge_consumed_bytes++;
     return true;
 }
 
@@ -78,6 +88,10 @@ static void edge_stop_timer_from_isr(void)
     TCCR3A = 0U;
     TCCR3B = 0U;
     TIFR3 = _BV(OCF3B);
+    if (timer3b_owner_get_from_isr() == TIMER3B_OWNER_EDGE)
+    {
+        timer3b_owner_set_from_isr(TIMER3B_OWNER_NONE);
+    }
 }
 
 static void edge_stop_timer_from_foreground(bool force_low)
@@ -88,6 +102,10 @@ static void edge_stop_timer_from_foreground(bool force_low)
         TCCR3A = 0U;
         TCCR3B = 0U;
         TIFR3 = _BV(OCF3B);
+        if (timer3b_owner_get_from_isr() == TIMER3B_OWNER_EDGE)
+        {
+            timer3b_owner_set_from_isr(TIMER3B_OWNER_NONE);
+        }
     }
     if (force_low)
     {
@@ -95,35 +113,48 @@ static void edge_stop_timer_from_foreground(bool force_low)
     }
 }
 
-static uint16_t edge_chunk_ticks(uint32_t ticks)
+/* First compare is relative to current Timer3 count. */
+static inline void edge_schedule_first_chunk_from_isr(uint16_t ticks)
 {
-    if (ticks == 0UL)
+    if (ticks == 0U) ticks = 1U;
+    OCR3B = (uint16_t)(TCNT3 + ticks);
+}
+
+/* Later chunks are anchored to the previous compare point. */
+static inline void edge_schedule_next_chunk_from_isr(uint16_t ticks)
+{
+    if (ticks == 0U) ticks = 1U;
+    OCR3B = (uint16_t)(OCR3B + ticks);
+}
+
+/*
+    Convert one signed-format magnitude into one or two Timer3 chunks.
+    This ISR helper uses only 8/16-bit arithmetic.  For L16, x256 is a shift.
+*/
+static inline uint16_t edge_prepare_interval_from_isr(uint8_t magnitude)
+{
+    if (edge_is_l16)
     {
-        return 1U;
+        edge_slot_tail_ticks = 0U;
+        return (uint16_t)magnitude << 8U;
     }
-    return (ticks > EDGE_TIMER_MAX_CHUNK_TICKS) ?
-        (uint16_t)EDGE_TIMER_MAX_CHUNK_TICKS : (uint16_t)ticks;
+
+    if (magnitude > EDGE_LEP_FIRST_CHUNK_UNITS)
+    {
+        /* On AVR unsigned int is 16 bit. Both factors are bounded so their
+           product remains below 65536: (127 - 75) * 800 = 41600. */
+        uint16_t tail_units = (uint16_t)(magnitude - EDGE_LEP_FIRST_CHUNK_UNITS);
+        edge_slot_tail_ticks = (uint16_t)(tail_units * (uint16_t)EDGE_LEP_UNIT_TICKS);
+        return EDGE_LEP_FIRST_CHUNK_TICKS;
+    }
+
+    edge_slot_tail_ticks = 0U;
+    /* 75 * 800 = 60000, also safe in a 16-bit unsigned product. */
+    return (uint16_t)((uint16_t)magnitude * (uint16_t)EDGE_LEP_UNIT_TICKS);
 }
 
-/* First slot after start/resume is anchored to the current timer position. */
-static void edge_schedule_first_chunk_from_isr(uint32_t ticks)
+static inline void edge_set_slot_level_from_isr(int8_t slot)
 {
-    uint16_t chunk = edge_chunk_ticks(ticks);
-    edge_slot_remaining_ticks = ticks - (uint32_t)chunk;
-    OCR3B = (uint16_t)(TCNT3 + chunk);
-}
-
-/* Subsequent chunks remain anchored to the preceding compare instant. */
-static void edge_schedule_next_chunk_from_isr(void)
-{
-    uint16_t chunk = edge_chunk_ticks(edge_slot_remaining_ticks);
-    edge_slot_remaining_ticks -= (uint32_t)chunk;
-    OCR3B = (uint16_t)(OCR3B + chunk);
-}
-
-static uint32_t edge_set_slot_level_from_isr(int8_t slot)
-{
-    uint8_t magnitude = (slot < 0) ? (uint8_t)(-slot) : (uint8_t)slot;
     uint8_t level = (slot > 0) ? 1U : 0U;
 
     if (edge_invert)
@@ -132,7 +163,6 @@ static uint32_t edge_set_slot_level_from_isr(int8_t slot)
     }
 
     mz_read_set_fast_from_isr(level);
-    return (uint32_t)magnitude * (uint32_t)edge_unit_ticks;
 }
 
 static bool edge_refill_once(void)
@@ -152,7 +182,7 @@ static bool edge_refill_once(void)
     used = edge_used_snapshot();
     if (used > EDGE_FIFO_CAPACITY)
     {
-        edge_set_error("EDGE FIFO", EDGE_PLAYBACK_IO_ERROR);
+        edge_set_error_P(PSTR("EDGE FIFO"), EDGE_PLAYBACK_IO_ERROR);
         return false;
     }
 
@@ -172,7 +202,7 @@ static bool edge_refill_once(void)
     received = sdcard_file_read(work, request);
     if (received < 0)
     {
-        edge_set_error("EDGE READ", EDGE_PLAYBACK_IO_ERROR);
+        edge_set_error_P(PSTR("EDGE READ"), EDGE_PLAYBACK_IO_ERROR);
         return false;
     }
 
@@ -191,6 +221,8 @@ static bool edge_refill_once(void)
         wav_sample_stream_isr_bytes[write_local & EDGE_FIFO_MASK] = work[i];
         write_local = (uint16_t)(write_local + 1U);
     }
+
+    edge_source_bytes_read += (uint32_t)received;
 
     ATOMIC_BLOCK(ATOMIC_RESTORESTATE)
     {
@@ -222,6 +254,11 @@ static bool edge_prefill(void)
     return edge_used_snapshot() != 0U;
 }
 
+/*
+   LEP/L16 intentionally do not scan the whole source during prepare. Their
+   screen uses byte progress, which is instant and costs no extra SD pass.
+*/
+
 void edge_playback_init(void)
 {
     edge_stop_timer_from_foreground(true);
@@ -229,13 +266,13 @@ void edge_playback_init(void)
     edge_write_sequence = 0U;
     edge_source_finished = 1U;
     edge_state = EDGE_PLAYBACK_STOPPED;
-    edge_unit_us = 50U;
-    edge_unit_ticks = 800U;
+    edge_is_l16 = false;
     edge_invert = false;
-    edge_paused_remaining_ticks = 0UL;
-    edge_slot_remaining_ticks = 0UL;
+    edge_slot_tail_ticks = 0U;
+    edge_paused_current_ticks = 0U;
+    edge_paused_tail_ticks = 0U;
     edge_total_bytes = 0UL;
-    edge_consumed_bytes = 0UL;
+    edge_source_bytes_read = 0UL;
     edge_error_text[0] = '\0';
 }
 
@@ -245,13 +282,11 @@ bool edge_playback_prepare(const char *path, uint8_t unit_us, bool invert)
 
     if ((path == NULL) || ((unit_us != 16U) && (unit_us != 50U)))
     {
-        edge_set_error("EDGE ARG", EDGE_PLAYBACK_BAD_FILE);
+        edge_set_error_P(PSTR("EDGE ARG"), EDGE_PLAYBACK_BAD_FILE);
         return false;
     }
 
-    /* Timer3 runs at 16 MHz, exact for both 16us and 50us units. */
-    edge_unit_us = unit_us;
-    edge_unit_ticks = (uint16_t)((uint16_t)unit_us * 16U);
+    edge_is_l16 = (unit_us == 16U);
     edge_invert = invert;
     edge_error_text[0] = '\0';
 
@@ -260,12 +295,15 @@ bool edge_playback_prepare(const char *path, uint8_t unit_us, bool invert)
         edge_read_sequence = 0U;
         edge_write_sequence = 0U;
         edge_source_finished = 0U;
-        edge_consumed_bytes = 0UL;
     }
+    edge_slot_tail_ticks = 0U;
+    edge_paused_current_ticks = 0U;
+    edge_paused_tail_ticks = 0U;
+    edge_source_bytes_read = 0UL;
 
     if (!sdcard_file_open_read(path))
     {
-        edge_set_error("EDGE OPEN", EDGE_PLAYBACK_IO_ERROR);
+        edge_set_error_P(PSTR("EDGE OPEN"), EDGE_PLAYBACK_IO_ERROR);
         return false;
     }
 
@@ -273,7 +311,7 @@ bool edge_playback_prepare(const char *path, uint8_t unit_us, bool invert)
     if ((edge_total_bytes == 0UL) || !edge_prefill())
     {
         sdcard_file_close();
-        edge_set_error("EMPTY EDGE", EDGE_PLAYBACK_BAD_FILE);
+        edge_set_error_P(PSTR("EMPTY EDGE"), EDGE_PLAYBACK_BAD_FILE);
         return false;
     }
 
@@ -284,6 +322,8 @@ bool edge_playback_prepare(const char *path, uint8_t unit_us, bool invert)
 bool edge_playback_start(void)
 {
     int8_t first;
+    uint8_t magnitude;
+    uint16_t first_ticks;
 
     if (edge_state != EDGE_PLAYBACK_READY)
     {
@@ -292,9 +332,13 @@ bool edge_playback_start(void)
 
     if (!edge_pop_from_isr(&first) || (first == 0))
     {
-        edge_set_error("EDGE FIRST", EDGE_PLAYBACK_BAD_FILE);
+        edge_set_error_P(PSTR("EDGE FIRST"), EDGE_PLAYBACK_BAD_FILE);
         return false;
     }
+
+    magnitude = (first < 0) ? (uint8_t)(-first) : (uint8_t)first;
+    edge_set_slot_level_from_isr(first);
+    first_ticks = edge_prepare_interval_from_isr(magnitude);
 
     ATOMIC_BLOCK(ATOMIC_RESTORESTATE)
     {
@@ -303,7 +347,8 @@ bool edge_playback_start(void)
         TCCR3B = _BV(CS30);
         TIFR3 = _BV(OCF3B);
         edge_state = EDGE_PLAYBACK_RUNNING;
-        edge_schedule_first_chunk_from_isr(edge_set_slot_level_from_isr(first));
+        timer3b_owner_set_from_isr(TIMER3B_OWNER_EDGE);
+        edge_schedule_first_chunk_from_isr(first_ticks);
         TIMSK3 |= _BV(OCIE3B);
     }
 
@@ -313,6 +358,8 @@ bool edge_playback_start(void)
 
 bool edge_playback_pause(void)
 {
+    uint16_t current_chunk_remaining;
+
     if (edge_state != EDGE_PLAYBACK_RUNNING)
     {
         return false;
@@ -320,14 +367,14 @@ bool edge_playback_pause(void)
 
     ATOMIC_BLOCK(ATOMIC_RESTORESTATE)
     {
-        uint16_t current_chunk_remaining = (uint16_t)(OCR3B - TCNT3);
+        current_chunk_remaining = (uint16_t)(OCR3B - TCNT3);
         if ((TIFR3 & _BV(OCF3B)) != 0U || current_chunk_remaining == 0U)
         {
             current_chunk_remaining = 1U;
         }
-        edge_paused_remaining_ticks = (uint32_t)current_chunk_remaining +
-                                      edge_slot_remaining_ticks;
-        edge_slot_remaining_ticks = 0UL;
+        edge_paused_current_ticks = current_chunk_remaining;
+        edge_paused_tail_ticks = edge_slot_tail_ticks;
+        edge_slot_tail_ticks = 0U;
         edge_stop_timer_from_isr();
         edge_state = EDGE_PLAYBACK_PAUSED;
     }
@@ -348,7 +395,11 @@ bool edge_playback_resume(void)
         TCCR3B = _BV(CS30);
         TIFR3 = _BV(OCF3B);
         edge_state = EDGE_PLAYBACK_RUNNING;
-        edge_schedule_first_chunk_from_isr(edge_paused_remaining_ticks);
+        edge_slot_tail_ticks = edge_paused_tail_ticks;
+        edge_paused_tail_ticks = 0U;
+        timer3b_owner_set_from_isr(TIMER3B_OWNER_EDGE);
+        edge_schedule_first_chunk_from_isr(edge_paused_current_ticks);
+        edge_paused_current_ticks = 0U;
         TIMSK3 |= _BV(OCIE3B);
     }
     return true;
@@ -362,8 +413,11 @@ void edge_playback_stop(void)
     edge_state = EDGE_PLAYBACK_STOPPED;
     edge_read_sequence = 0U;
     edge_write_sequence = 0U;
-    edge_paused_remaining_ticks = 0UL;
-    edge_slot_remaining_ticks = 0UL;
+    edge_slot_tail_ticks = 0U;
+    edge_paused_current_ticks = 0U;
+    edge_paused_tail_ticks = 0U;
+    edge_total_bytes = 0UL;
+    edge_source_bytes_read = 0UL;
     mz_sense_set(true);
 }
 
@@ -408,27 +462,35 @@ uint8_t edge_playback_get_buffer_fill_percent(void)
 
 uint32_t edge_playback_get_consumed_bytes(void)
 {
-    uint32_t result;
-    ATOMIC_BLOCK(ATOMIC_RESTORESTATE)
-    {
-        result = edge_consumed_bytes;
-    }
-    return result;
+    uint16_t buffered = edge_used_snapshot();
+    uint32_t read = edge_source_bytes_read;
+
+    return ((uint32_t)buffered > read) ? 0UL : (read - (uint32_t)buffered);
 }
 
-uint32_t edge_playback_get_total_bytes(void) { return edge_total_bytes; }
+uint32_t edge_playback_get_total_bytes(void)
+{
+    return edge_total_bytes;
+}
 
-/*
-    Timer3 compare-B has exactly one hardware vector in the complete firmware.
-    LEP/L16 and MZF/MZT both use it, but play_engine guarantees that only one
-    source is running at a time.  Keep the vector here and let the MZF module
-    explicitly claim a compare event only while its NORMAL PWM transport owns
-    Timer3.  ULTRA FAST itself is foreground handshake code and never claims
-    Timer3 compare-B.
-*/
+uint8_t edge_playback_get_progress_percent(void)
+{
+    uint32_t total = edge_total_bytes;
+    uint32_t consumed = edge_playback_get_consumed_bytes();
+    uint32_t percent;
+
+    if (total == 0UL) return 0U;
+    if (consumed >= total) return 100U;
+
+    /* Edge files used here are far below the 42 MiB 32-bit x100 limit. */
+    percent = ((consumed * 100UL) + (total / 2UL)) / total;
+    return (percent > 100UL) ? 100U : (uint8_t)percent;
+}
+
 static void edge_playback_timer3_compb_from_isr(void)
 {
     int8_t next;
+    uint8_t magnitude;
 
     if (edge_state != EDGE_PLAYBACK_RUNNING)
     {
@@ -436,10 +498,11 @@ static void edge_playback_timer3_compb_from_isr(void)
         return;
     }
 
-    /* A LEP zero can mean 101600 Timer3 ticks.  Complete its chunks first. */
-    if (edge_slot_remaining_ticks != 0UL)
+    if (edge_slot_tail_ticks != 0U)
     {
-        edge_schedule_next_chunk_from_isr();
+        uint16_t tail = edge_slot_tail_ticks;
+        edge_slot_tail_ticks = 0U;
+        edge_schedule_next_chunk_from_isr(tail);
         return;
     }
 
@@ -455,21 +518,31 @@ static void edge_playback_timer3_compb_from_isr(void)
     if (next == 0)
     {
         /* 0 extends the current polarity by exactly 127 format units. */
-        edge_slot_remaining_ticks = (uint32_t)127U * (uint32_t)edge_unit_ticks;
-        edge_schedule_next_chunk_from_isr();
+        edge_schedule_next_chunk_from_isr(edge_prepare_interval_from_isr(127U));
         return;
     }
 
-    edge_slot_remaining_ticks = edge_set_slot_level_from_isr(next);
-    edge_schedule_next_chunk_from_isr();
+    magnitude = (next < 0) ? (uint8_t)(-next) : (uint8_t)next;
+    edge_set_slot_level_from_isr(next);
+    edge_schedule_next_chunk_from_isr(edge_prepare_interval_from_isr(magnitude));
 }
 
 ISR(TIMER3_COMPB_vect)
 {
-    if (mzf_playback_timer3_compb_from_isr())
+    switch (timer3b_owner_get_from_isr())
     {
-        return;
-    }
+        case TIMER3B_OWNER_EDGE:
+            edge_playback_timer3_compb_from_isr();
+            break;
 
-    edge_playback_timer3_compb_from_isr();
+        case TIMER3B_OWNER_MZF:
+            (void)mzf_playback_timer3_compb_from_isr();
+            break;
+
+        case TIMER3B_OWNER_NONE:
+        default:
+            TIMSK3 &= (uint8_t)~_BV(OCIE3B);
+            TIFR3 = _BV(OCF3B);
+            break;
+    }
 }

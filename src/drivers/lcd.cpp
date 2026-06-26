@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 #include <LiquidCrystal.h>
+#include <avr/pgmspace.h>
 
 #define LCD_RS 8
 #define LCD_EN 9
@@ -44,4 +45,15 @@ void lcd_set_cursor(uint8_t col, uint8_t row)
 void lcd_print(const char *text)
 {
     lcd.print(text);
+}
+
+void lcd_print_P(PGM_P text)
+{
+    if (text == NULL) return;
+    for (;;)
+    {
+        char character = (char)pgm_read_byte(text++);
+        if (character == '\0') break;
+        lcd.write((uint8_t)character);
+    }
 }

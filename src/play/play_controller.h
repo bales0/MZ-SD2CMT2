@@ -20,53 +20,44 @@ typedef struct
     const char *filename;
     const char *full_path;
     file_format_t format;
-    menu_play_mode_t play_mode;
     bool invert_signal;
     play_control_mode_t control_mode;
     bool waiting_for_motor;
-    bool manual_override;
+
+    /* These are mutually exclusive while state == PAUSED. */
+    bool paused_by_motor;
+    bool paused_by_user;
 
     play_controller_state_t state;
     const char *error_text;
 
-    uint8_t output_pin;
+    /* WAV/MZF/MZT/M12 show active transport time and nominal duration. */
+    uint32_t elapsed_ms;
+    uint32_t total_duration_ms;
 
-    /*
-        Valid during WAV playback. Percent is derived from emitted sample
-        periods, not wall-clock time.
-    */
-    uint32_t played_samples;
-    uint32_t total_samples;
+    /* LEP/L16 show immediate source-byte progress instead of a scanned duration. */
+    bool progress_is_percent;
     uint8_t progress_percent;
 
     /* Prepared sample FIFO fill 0..100 %. */
     uint8_t buffer_fill_percent;
-
-    /*
-        Software measurement is off for real-time safety. The precise jitter
-        reference is the hardware Timer1 marker on Mega D11.
-    */
-    uint16_t jitter_ticks;
-    uint8_t timing_marker_pin;
 } play_controller_view_t;
 
 void play_controller_init(void);
 void play_controller_start_session(const char *filename,
                                    const char *full_path,
-                                   menu_play_mode_t play_mode,
                                    bool invert_signal,
                                    play_control_mode_t control_mode);
 void play_controller_toggle_play_pause(void);
 void play_controller_stop(void);
 
-/* Synchronizes UI state with asynchronous WAV completion/error. */
+/* Synchronizes UI state with asynchronous transport completion/error. */
 void play_controller_service(void);
 
 void play_controller_get_view(play_controller_view_t *view);
 const char* play_controller_get_filename(void);
 const char* play_controller_get_full_path(void);
 file_format_t play_controller_get_format(void);
-menu_play_mode_t play_controller_get_play_mode(void);
 bool play_controller_get_invert_signal(void);
 play_control_mode_t play_controller_get_control_mode(void);
 play_controller_state_t play_controller_get_state(void);

@@ -3,6 +3,7 @@
 #include <string.h>
 #include "browser.h"
 #include "../drivers/lcd.h"
+#include "../drivers/flash_text.h"
 #include "../drivers/sdcard.h"
 #include "../streams/cmt_mode_scratch.h"
 
@@ -23,11 +24,11 @@ static bool sd_ok = false;
 static uint16_t dir_count = 0;
 /* Index in alphabetical browser order, not physical FAT directory order. */
 static uint16_t selected_index = 0;
-static char current_path[BROWSER_PATH_MAX] = "/";
+static char current_path[BROWSER_PATH_MAX] = { '/', '\0' };
 static sdcard_entry_t current_entry;
 static char selected_full_path[BROWSER_FULL_PATH_MAX];
 static bool saved_position_valid = false;
-static char saved_path[BROWSER_PATH_MAX] = "/";
+static char saved_path[BROWSER_PATH_MAX] = { '/', '\0' };
 static char saved_name[BROWSER_NAME_MAX];
 static bool saved_is_dir = false;
 static uint8_t parent_stack_depth = 0;
@@ -36,42 +37,92 @@ static char status_message[17];
 static uint32_t status_message_until_ms = 0;
 static bool right_locked_until_release = false;
 
-/* Horizontal position of the selected filename on the 16-character LCD. */
+/* Horizontal positions on the 16-character LCD. */
 static uint8_t name_scroll_offset = 0U;
 static uint32_t name_scroll_next_ms = 0U;
+/* The active directory gets its own scroll state; it must not jump when the
+   selected file on the second line changes. */
+static uint8_t path_scroll_offset = 0U;
+static uint32_t path_scroll_next_ms = 0U;
+
+static void browser_reset_name_scroll(void);
+static void browser_reset_path_scroll(void);
+static void browser_update_selected_full_path(void);
 
 static void lcd_print_line(uint8_t row, const char *text)
 {
     char line[17];
-    snprintf(line, sizeof(line), "%-16s", text);
-    lcd_set_cursor(0, row);
+    uint8_t length = 0U;
+    if (text != NULL)
+    {
+        while ((length < 16U) && (text[length] != '\0'))
+        {
+            line[length] = text[length];
+            ++length;
+        }
+    }
+    while (length < 16U) line[length++] = ' ';
+    line[16] = '\0';
+    lcd_set_cursor(0U, row);
     lcd_print(line);
 }
 
-static void show_message(const char *line0, const char *line1, uint16_t hold_ms)
+static void lcd_print_line_P(uint8_t row, PGM_P text)
+{
+    char line[17];
+    flash_text_copy(line, sizeof(line), text);
+    lcd_print_line(row, line);
+}
+
+static void show_message_P(PGM_P line0, PGM_P line1, uint16_t hold_ms)
 {
     lcd_clear();
-    lcd_print_line(0, line0);
-    lcd_print_line(1, line1);
+    lcd_print_line_P(0U, line0);
+    lcd_print_line_P(1U, line1);
     delay(hold_ms);
     lcd_clear();
 }
 
-static void set_status_message(const char *message)
+static void set_status_message_P(PGM_P message)
 {
-    snprintf(status_message, sizeof(status_message), "%-16s", message);
+    flash_text_copy(status_message, sizeof(status_message), message);
+    for (uint8_t i = 0U; i < 16U; ++i)
+    {
+        if (status_message[i] == '\0')
+        {
+            for (; i < 16U; ++i) status_message[i] = ' ';
+            break;
+        }
+    }
+    status_message[16] = '\0';
     status_message_until_ms = millis() + MESSAGE_HOLD_MS;
+}
+
+static void browser_set_current_entry_message_P(PGM_P message)
+{
+    memset(&current_entry, 0, sizeof(current_entry));
+    flash_text_copy(current_entry.name, sizeof(current_entry.name), message);
+    current_entry.is_dir = false;
+    current_entry.size = 0U;
+    browser_reset_name_scroll();
+    browser_update_selected_full_path();
 }
 
 static bool browser_is_root(void)
 {
-    return strcmp(current_path, "/") == 0;
+    return (current_path[0] == '/') && (current_path[1] == '\0');
 }
 
 static void browser_reset_name_scroll(void)
 {
     name_scroll_offset = 0U;
     name_scroll_next_ms = millis() + NAME_SCROLL_START_MS;
+}
+
+static void browser_reset_path_scroll(void)
+{
+    path_scroll_offset = 0U;
+    path_scroll_next_ms = millis() + NAME_SCROLL_START_MS;
 }
 
 static void browser_update_selected_full_path(void)
@@ -83,11 +134,13 @@ static void browser_update_selected_full_path(void)
     }
     if (browser_is_root())
     {
-        snprintf(selected_full_path, sizeof(selected_full_path), "/%s", current_entry.name);
+        selected_full_path[0] = '/';
+        strncpy(&selected_full_path[1], current_entry.name, sizeof(selected_full_path) - 2U);
+        selected_full_path[sizeof(selected_full_path) - 1U] = '\0';
     }
     else
     {
-        snprintf(selected_full_path, sizeof(selected_full_path), "%s/%s", current_path, current_entry.name);
+        flash_text_snprintf(selected_full_path, sizeof(selected_full_path), PSTR("%s/%s"), current_path, current_entry.name);
     }
 }
 
@@ -117,15 +170,15 @@ static void browser_set_entry_read_error(void)
     if (!sd_ok)
     {
         dir_count = 0U;
-        browser_set_current_entry_message("SD CARD ERROR");
+        browser_set_current_entry_message_P(PSTR("SD CARD ERROR"));
         return;
     }
 
     error_message = sdcard_last_error();
     if ((error_message == NULL) || (error_message[0] == '\0') ||
-        (strcmp(error_message, "OK") == 0) || (strcmp(error_message, "NO ENTRY") == 0))
+        (strcmp_P(error_message, PSTR("OK")) == 0) || (strcmp_P(error_message, PSTR("NO ENTRY")) == 0))
     {
-        browser_set_current_entry_message("DIR FAIL");
+        browser_set_current_entry_message_P(PSTR("DIR FAIL"));
         return;
     }
 
@@ -165,7 +218,7 @@ static browser_directory_load_result_t browser_scan_current_directory(void)
 
     if (dir_count == 0U)
     {
-        browser_set_current_entry_message("EMPTY");
+        browser_set_current_entry_message_P(PSTR("EMPTY"));
         return BROWSER_DIRECTORY_EMPTY;
     }
 
@@ -212,19 +265,20 @@ static void browser_build_dir_index(void)
 
 static void browser_reset_root_state(void)
 {
-    strncpy(current_path, "/", sizeof(current_path) - 1U);
-    current_path[sizeof(current_path) - 1U] = '\0';
+    current_path[0] = '/';
+    current_path[1] = '\0';
     dir_count = 0U;
     selected_index = 0U;
     memset(&current_entry, 0, sizeof(current_entry));
     selected_full_path[0] = '\0';
     saved_position_valid = false;
-    strncpy(saved_path, "/", sizeof(saved_path) - 1U);
-    saved_path[sizeof(saved_path) - 1U] = '\0';
+    saved_path[0] = '/';
+    saved_path[1] = '\0';
     saved_name[0] = '\0';
     saved_is_dir = false;
     parent_stack_depth = 0U;
     browser_reset_name_scroll();
+    browser_reset_path_scroll();
 }
 
 /*
@@ -343,7 +397,7 @@ static bool browser_pop_parent_position_and_restore(void)
 
 static void browser_refresh_sd(void)
 {
-    show_message("SD INIT", "PLEASE WAIT", 300);
+    show_message_P(PSTR("SD INIT"), PSTR("PLEASE WAIT"), 300U);
 
     /* A card retry deliberately discards the former path and selection.  The
        media may have been replaced, so root and its first alphabetical item
@@ -381,6 +435,7 @@ static void browser_go_parent(void)
     }
     selected_index = 0U;
     saved_position_valid = false;
+    browser_reset_path_scroll();
     browser_build_dir_index();
     browser_pop_parent_position_and_restore();
 }
@@ -403,7 +458,7 @@ static bool browser_enter_directory(const char *name)
     }
     if (required_length >= sizeof(new_path))
     {
-        set_status_message("PATH TOO LONG");
+        set_status_message_P(PSTR("PATH TOO LONG"));
         return false;
     }
 
@@ -424,6 +479,7 @@ static bool browser_enter_directory(const char *name)
     current_path[sizeof(current_path) - 1U] = '\0';
     selected_index = 0U;
     saved_position_valid = false;
+    browser_reset_path_scroll();
     browser_build_dir_index();
     return true;
 }
@@ -466,7 +522,7 @@ static void browser_move_up(void)
     {
         /* A no-neighbour result is a normal end-of-sort condition. Wrap
            instead of exposing the internal "NO ENTRY" diagnostic. */
-        if (sdcard_is_mounted() && (strcmp(sdcard_last_error(), "NO ENTRY") == 0))
+        if (sdcard_is_mounted() && (strcmp_P(sdcard_last_error(), PSTR("NO ENTRY")) == 0))
         {
             browser_load_last_entry();
         }
@@ -492,7 +548,7 @@ static void browser_move_down(void)
     {
         /* See browser_move_up(): keep a stale count or a tie at the end of
            the sort from producing a visible "NO ENTRY" line. */
-        if (sdcard_is_mounted() && (strcmp(sdcard_last_error(), "NO ENTRY") == 0))
+        if (sdcard_is_mounted() && (strcmp_P(sdcard_last_error(), PSTR("NO ENTRY")) == 0))
         {
             browser_load_first_entry();
         }
@@ -512,7 +568,7 @@ static browser_action_t browser_select_current(void)
     }
     if (dir_count == 0U)
     {
-        set_status_message("EMPTY DIR");
+        set_status_message_P(PSTR("EMPTY DIR"));
         return BROWSER_ACTION_NONE;
     }
     if (current_entry.is_dir)
@@ -520,7 +576,7 @@ static browser_action_t browser_select_current(void)
         browser_enter_directory(current_entry.name);
         return BROWSER_ACTION_NONE;
     }
-    set_status_message("FILE SELECT");
+    set_status_message_P(PSTR("FILE SELECT"));
     return BROWSER_ACTION_FILE_SELECTED;
 }
 
@@ -549,26 +605,6 @@ static browser_action_t browser_request_record(void)
 
     sd_ok = true;
     return BROWSER_ACTION_RECORD_REQUESTED;
-}
-
-static void browser_make_path_label(char *out, size_t out_size)
-{
-    if (out == NULL || out_size == 0U)
-    {
-        return;
-    }
-    if (browser_is_root())
-    {
-        snprintf(out, out_size, "/");
-        return;
-    }
-    const char *last_slash = strrchr(current_path, '/');
-    if ((last_slash == NULL) || (*(last_slash + 1) == '\0'))
-    {
-        snprintf(out, out_size, "/");
-        return;
-    }
-    snprintf(out, out_size, "%s", last_slash + 1);
 }
 
 void browser_init(bool initial_sd_ok)
@@ -630,48 +666,118 @@ browser_action_t browser_handle_event(button_event_t event)
     return BROWSER_ACTION_NONE;
 }
 
-void browser_service(void)
+static uint8_t browser_unsigned_length(uint16_t value)
+{
+    uint8_t length = 1U;
+
+    while (value >= 10U)
+    {
+        value = (uint16_t)(value / 10U);
+        length++;
+    }
+    return length;
+}
+
+static uint8_t browser_position_counter_length(void)
+{
+    uint16_t display_index = (dir_count == 0U) ? 0U :
+        (uint16_t)(selected_index + 1U);
+    uint16_t display_count = dir_count;
+
+    if (display_index > MAX_DIR_ENTRIES) display_index = MAX_DIR_ENTRIES;
+    if (display_count > MAX_DIR_ENTRIES) display_count = MAX_DIR_ENTRIES;
+
+    return (uint8_t)(browser_unsigned_length(display_index) + 1U +
+                     browser_unsigned_length(display_count));
+}
+
+static const char *browser_current_directory_name(void)
+{
+    const char *last_slash;
+
+    if (browser_is_root())
+    {
+        return NULL;
+    }
+
+    last_slash = strrchr(current_path, '/');
+    if ((last_slash == NULL) || (*(last_slash + 1U) == '\0'))
+    {
+        return NULL;
+    }
+    return last_slash + 1U;
+}
+
+static uint8_t browser_path_name_columns(void)
+{
+    uint8_t counter_length = browser_position_counter_length();
+    uint8_t counter_column = (uint8_t)(LCD_COLUMNS - counter_length);
+
+    /* Non-root line 0 uses "../" plus one dedicated blank before N/N. */
+    return (counter_column > 4U) ? (uint8_t)(counter_column - 4U) : 0U;
+}
+
+static void browser_advance_scroll(const char *text, uint8_t visible_columns,
+                                   uint8_t *offset, uint32_t *next_ms)
 {
     uint32_t now;
-    size_t name_length;
+    size_t length;
     uint8_t maximum_offset;
+
+    if ((text == NULL) || (visible_columns == 0U))
+    {
+        *offset = 0U;
+        return;
+    }
+
+    length = strlen(text);
+    if (length <= visible_columns)
+    {
+        *offset = 0U;
+        return;
+    }
+
+    now = millis();
+    if ((int32_t)(now - *next_ms) < 0)
+    {
+        return;
+    }
+
+    maximum_offset = (uint8_t)(length - visible_columns);
+    if (*offset < maximum_offset)
+    {
+        (*offset)++;
+        if (*offset >= maximum_offset)
+        {
+            *next_ms = now + NAME_SCROLL_END_PAUSE_MS;
+        }
+        else
+        {
+            *next_ms = now + NAME_SCROLL_STEP_MS;
+        }
+    }
+    else
+    {
+        *offset = 0U;
+        *next_ms = now + NAME_SCROLL_START_MS;
+    }
+}
+
+void browser_service(void)
+{
+    const char *directory_name;
 
     if (right_locked_until_release && (keypad_get_button() != BUTTON_RIGHT))
     {
         right_locked_until_release = false;
     }
 
-    name_length = strlen(current_entry.name);
-    if (name_length <= LCD_COLUMNS)
-    {
-        name_scroll_offset = 0U;
-        return;
-    }
+    browser_advance_scroll(current_entry.name, LCD_COLUMNS, &name_scroll_offset,
+                           &name_scroll_next_ms);
 
-    now = millis();
-    if ((int32_t)(now - name_scroll_next_ms) < 0)
-    {
-        return;
-    }
-
-    maximum_offset = (uint8_t)(name_length - LCD_COLUMNS);
-    if (name_scroll_offset < maximum_offset)
-    {
-        name_scroll_offset++;
-        if (name_scroll_offset >= maximum_offset)
-        {
-            name_scroll_next_ms = now + NAME_SCROLL_END_PAUSE_MS;
-        }
-        else
-        {
-            name_scroll_next_ms = now + NAME_SCROLL_STEP_MS;
-        }
-    }
-    else
-    {
-        name_scroll_offset = 0U;
-        name_scroll_next_ms = now + NAME_SCROLL_START_MS;
-    }
+    directory_name = browser_current_directory_name();
+    browser_advance_scroll(directory_name, browser_path_name_columns(),
+                           &path_scroll_offset, &path_scroll_next_ms);
 }
 
 static void browser_format_entry_line(char *line, const sdcard_entry_t *entry)
@@ -729,7 +835,7 @@ static uint8_t browser_write_unsigned(char *line, uint8_t column, uint16_t value
     return column;
 }
 
-static void browser_format_position_line(char *line, const char *path_label)
+static void browser_format_position_line(char *line)
 {
     char counter[8];
     uint8_t counter_length;
@@ -750,19 +856,43 @@ static void browser_format_position_line(char *line, const char *path_label)
     memset(line, ' ', LCD_COLUMNS);
     line[LCD_COLUMNS] = '\0';
 
-    /* The counter is compact but right-aligned: "/GAMES        2/3".
-       The root is shown as "/            2/3". */
     counter_length = browser_write_unsigned(counter, 0U, display_index);
     counter[counter_length++] = '/';
     counter_length = browser_write_unsigned(counter, counter_length, display_count);
     counter[counter_length] = '\0';
     counter_column = (uint8_t)(LCD_COLUMNS - counter_length);
 
-    if ((path_label != NULL) && (path_label[0] != '\0'))
+    if (browser_is_root())
     {
-        while ((*path_label != '\0') && (path_column < counter_column))
+        line[0] = '/';
+    }
+    else
+    {
+        const char *directory_name = browser_current_directory_name();
+        size_t name_length = (directory_name == NULL) ? 0U : strlen(directory_name);
+        uint8_t visible_columns = browser_path_name_columns();
+        uint8_t offset = path_scroll_offset;
+
+        /* "../" says that LEFT returns to a parent directory.  Keep the
+           column immediately before N/N blank so the directory name never
+           visually joins the position counter. */
+        if (counter_column >= 4U)
         {
-            line[path_column++] = *path_label++;
+            memcpy_P(line, PSTR("../"), 3U);
+            path_column = 3U;
+        }
+
+        if ((name_length <= visible_columns) ||
+            (offset > (uint8_t)(name_length - visible_columns)))
+        {
+            offset = 0U;
+        }
+
+        while ((directory_name != NULL) &&
+               (path_column < (uint8_t)(counter_column - 1U)) &&
+               ((size_t)offset < name_length))
+        {
+            line[path_column++] = directory_name[offset++];
         }
     }
 
@@ -782,35 +912,31 @@ void browser_render(void)
         if (sd_ok)
         {
             lcd_set_cursor(0, 1);
-            lcd_print("                ");
+            lcd_print_P(PSTR("                "));
         }
         else
         {
             lcd_set_cursor(0, 1);
-            lcd_print("RIGHT=RETRY     ");
+            lcd_print_P(PSTR("RIGHT=RETRY     "));
         }
         return;
     }
 
     if (!sd_ok)
     {
-        snprintf(line0, sizeof(line0), "%-16s", "SD CARD ERROR");
-        snprintf(line1, sizeof(line1), "%-16s", "RIGHT=RETRY");
+        flash_text_copy(line0, sizeof(line0), PSTR("SD CARD ERROR"));
+        flash_text_copy(line1, sizeof(line1), PSTR("RIGHT=RETRY"));
     }
     else if (dir_count == 0U)
     {
-        char path_label[9];
-        browser_make_path_label(path_label, sizeof(path_label));
-        browser_format_position_line(line0, path_label);
+        browser_format_position_line(line0);
         memset(line1, ' ', LCD_COLUMNS);
-        memcpy(line1, "EMPTY", 5U);
+        memcpy_P(line1, PSTR("EMPTY"), 5U);
         line1[LCD_COLUMNS] = '\0';
     }
     else
     {
-        char path_label[9];
-        browser_make_path_label(path_label, sizeof(path_label));
-        browser_format_position_line(line0, path_label);
+        browser_format_position_line(line0);
         browser_format_entry_line(line1, &current_entry);
     }
 

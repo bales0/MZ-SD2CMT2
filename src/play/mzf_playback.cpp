@@ -1,13 +1,14 @@
 #include "mzf_playback.h"
+#include "timer3b_owner.h"
 
 #include <Arduino.h>
 #include <avr/io.h>
 #include <avr/interrupt.h>
 #include <util/atomic.h>
-#include <avr/pgmspace.h>
 #include <string.h>
 
 #include "../drivers/mzio.h"
+#include "../drivers/flash_text.h"
 #include "../drivers/sdcard.h"
 #include "../streams/wav_sample_stream.h"
 
@@ -18,12 +19,10 @@
 /*
     The binary MZF/M12 header is 128 bytes. MZT is handled as a sequence of
     header + declared data-block records, each separated by the MZ MOTOR
-    pause/restart cycle expected by the original monitor loader.
+    pause/restart cycle expected by the original monitor routine.
 */
 #define MZF_HEADER_BYTES 128U
-#define MZF_JUMPER_BYTES 12U
 #define MZF_HEADER_DATA_LENGTH_OFFSET 0x12U
-#define MZF_HEADER_TYPE_OFFSET 0x00U
 
 /*
     MZ-800 monitor waveform, matched to the validated reference WAV:
@@ -32,7 +31,7 @@
       long  / logical 1: HIGH 500 us, LOW 500 us (1000 us total)
 
     The MZ-800 ``sane'' tape framing sends a 6,400-short-pulse leader before
-    both the header and the data (or ULTRA FAST jumper) section.  The old
+    both the header and the data section.  The old
     MZ-700-style 480/680 us profile produced an output stream about 26 % too
     short for the MZ-800 reference format.
 */
@@ -56,7 +55,6 @@
 #define MZF_FIFO_CAPACITY (MZF_FIFO_BYTES - 1U)
 #define MZF_FIFO_MASK (MZF_FIFO_BYTES - 1U)
 #define MZF_REFILL_BLOCK WAV_SAMPLE_STREAM_REFILL_BLOCK
-#define MZF_ULTRA_HANDSHAKE_TIMEOUT_US 500000UL
 /*
     Header/data boundaries normally use an MZ MOTOR off/on cycle.  Some
     transports, and PLAY CTRL / MANUAL, leave MOTOR high; do not strand a
@@ -72,9 +70,7 @@ typedef enum
 {
     MZF_STAGE_NONE = 0,
     MZF_STAGE_HEADER,
-    MZF_STAGE_DATA,
-    MZF_STAGE_JUMPER,
-    MZF_STAGE_ULTRA_DATA
+    MZF_STAGE_DATA
 } mzf_stage_t;
 
 typedef enum
@@ -98,38 +94,11 @@ static volatile uint8_t mzf_state = MZF_PLAYBACK_STOPPED;
 static char mzf_error_text[17];
 
 static file_format_t mzf_format = FILE_FORMAT_UNKNOWN;
-static menu_play_mode_t mzf_play_mode = MENU_PLAY_MODE_NORMAL;
-/*
-    MZF/MZT/M12 always use the native Sharp CMT polarity.  The global
-    PLAY/INVERT SIG. option belongs to sampled WAV and edge-timed LEP/L16
-    playback only; it must not alter monitor PWM nor the ULTRA FAST loader
-    protocol.
-*/
-static bool mzf_ultra_enabled = false;
+
+/* MZF/MZT/M12 always use the native Sharp CMT polarity. */
 
 static uint8_t mzf_header[MZF_HEADER_BYTES];
-static uint8_t mzf_jumper[MZF_JUMPER_BYTES];
 static uint8_t mzf_header_offset = 0U;
-static uint8_t mzf_jumper_offset = 0U;
-
-/*
-    This is the Z80 loader from the prior MZ-SD2CMT firmware. It lives in
-    flash, then is copied into the unused part of the 128-byte monitor header.
-    The monitor has that header in RAM when the short jumper invokes it.
-*/
-static const uint8_t mzf_ultra_loader[] PROGMEM =
-{
-    0xED, 0x43, 0x02, 0x11, 0x22, 0x04, 0x11, 0xED,
-    0x53, 0x06, 0x11, 0xD5, 0x11, 0x02, 0xE0, 0xDD,
-    0x21, 0x03, 0xE0, 0xAF, 0x3D, 0x20, 0xFD, 0xF3,
-    0x1A, 0xE6, 0x20, 0x28, 0xFB, 0xDD, 0x36, 0x00,
-    0x03, 0xC5, 0x01, 0x00, 0x04, 0x1A, 0xCB, 0x67,
-    0x28, 0xFB, 0xE6, 0x20, 0xB1, 0x07, 0x4F, 0xDD,
-    0x36, 0x00, 0x02, 0x1A, 0xCB, 0x67, 0x20, 0xFB,
-    0xE6, 0x20, 0xB1, 0x07, 0x4F, 0xDD, 0x36, 0x00,
-    0x03, 0x10, 0xE2, 0x71, 0xC1, 0x0B, 0x23, 0x79,
-    0xB0, 0x20, 0xD6, 0xFB, 0xE1, 0xE9, 0x00
-};
 
 static volatile uint16_t mzf_fifo_read_sequence = 0U;
 static volatile uint16_t mzf_fifo_write_sequence = 0U;
@@ -140,8 +109,8 @@ static uint32_t mzf_record_data_length = 0UL;
 /* Absolute end position of the current declared data record. */
 static uint32_t mzf_record_data_file_end = 0UL;
 static uint32_t mzf_record_data_read = 0UL;
-static volatile uint32_t mzf_record_data_emitted = 0UL;
-static volatile uint32_t mzf_consumed_source_bytes = 0UL;
+/* Calculated in foreground before playback; no progress counters are kept in ISR. */
+static uint32_t mzf_total_duration_ms = 0UL;
 
 static mzf_stage_t mzf_stage = MZF_STAGE_NONE;
 static mzf_normal_step_t mzf_normal_step = MZF_STEP_BEGIN;
@@ -157,6 +126,7 @@ static bool mzf_normal_header_preamble = true;
 static volatile bool mzf_boundary_waiting = false;
 static volatile uint8_t mzf_motor_low_seen = 0U;
 static bool mzf_timer_phase_high = false;
+static bool mzf_current_pulse_is_long = false;
 static bool mzf_paused_mid_pulse = false;
 static uint16_t mzf_paused_remaining_ticks = 0U;
 
@@ -164,23 +134,16 @@ static uint16_t mzf_paused_remaining_ticks = 0U;
 static bool mzf_boundary_auto_timer_armed = false;
 static uint32_t mzf_boundary_auto_start_ms = 0UL;
 
-static void mzf_copy_error_text(const char *text)
+static void mzf_set_error_P(PGM_P text, mzf_playback_state_t state)
 {
-    if (text == NULL) text = "MZF ERROR";
-    strncpy(mzf_error_text, text, sizeof(mzf_error_text) - 1U);
-    mzf_error_text[sizeof(mzf_error_text) - 1U] = '\0';
-}
-
-static void mzf_set_error(const char *text, mzf_playback_state_t state)
-{
-    mzf_copy_error_text(text);
+    flash_text_copy(mzf_error_text, sizeof(mzf_error_text), text);
     mzf_state = (uint8_t)state;
     mz_sense_set(true);
 }
 
-static void mzf_set_error_from_isr(const char *text, mzf_playback_state_t state)
+static void mzf_set_error_from_isr_P(PGM_P text, mzf_playback_state_t state)
 {
-    mzf_copy_error_text(text);
+    flash_text_copy(mzf_error_text, sizeof(mzf_error_text), text);
     mzf_state = (uint8_t)state;
     mz_read_set_fast_from_isr(0U);
     mz_sense_set_fast(true);
@@ -192,6 +155,10 @@ static void mzf_stop_timer_from_isr(void)
     TCCR3A = 0U;
     TCCR3B = 0U;
     TIFR3 = _BV(OCF3B);
+    if (timer3b_owner_get_from_isr() == TIMER3B_OWNER_MZF)
+    {
+        timer3b_owner_set_from_isr(TIMER3B_OWNER_NONE);
+    }
 }
 
 static void mzf_stop_timer_from_foreground(bool force_low)
@@ -202,6 +169,10 @@ static void mzf_stop_timer_from_foreground(bool force_low)
         TCCR3A = 0U;
         TCCR3B = 0U;
         TIFR3 = _BV(OCF3B);
+        if (timer3b_owner_get_from_isr() == TIMER3B_OWNER_MZF)
+        {
+            timer3b_owner_set_from_isr(TIMER3B_OWNER_NONE);
+        }
     }
     if (force_low)
     {
@@ -217,6 +188,7 @@ static void mzf_timer_start_first(uint16_t ticks)
     TCCR3B = _BV(CS30);
     TIFR3 = _BV(OCF3B);
     OCR3B = ticks;
+    timer3b_owner_set_from_isr(TIMER3B_OWNER_MZF);
     TIMSK3 |= _BV(OCIE3B);
 }
 
@@ -283,7 +255,7 @@ static bool mzf_refill_data_once(void)
     used = mzf_fifo_used_snapshot();
     if (used > MZF_FIFO_CAPACITY)
     {
-        mzf_set_error("MZF FIFO", MZF_PLAYBACK_IO_ERROR);
+        mzf_set_error_P(PSTR("MZF FIFO"), MZF_PLAYBACK_IO_ERROR);
         return false;
     }
 
@@ -307,12 +279,12 @@ static bool mzf_refill_data_once(void)
     received = sdcard_file_read(work, request);
     if (received < 0)
     {
-        mzf_set_error("MZF READ", MZF_PLAYBACK_IO_ERROR);
+        mzf_set_error_P(PSTR("MZF READ"), MZF_PLAYBACK_IO_ERROR);
         return false;
     }
     if (received == 0)
     {
-        mzf_set_error("MZF SHORT", MZF_PLAYBACK_BAD_FILE);
+        mzf_set_error_P(PSTR("MZF SHORT"), MZF_PLAYBACK_BAD_FILE);
         return false;
     }
 
@@ -367,15 +339,21 @@ static bool mzf_read_header_record(void)
 
     if ((mzf_file_size - sdcard_file_position()) < MZF_HEADER_BYTES)
     {
-        mzf_set_error("MZT HEADER", MZF_PLAYBACK_BAD_FILE);
+        mzf_set_error_P(PSTR("MZT HEADER"), MZF_PLAYBACK_BAD_FILE);
         return false;
     }
 
     received = sdcard_file_read(mzf_header, MZF_HEADER_BYTES);
     if (received != (int16_t)MZF_HEADER_BYTES)
     {
-        mzf_set_error((received < 0) ? "MZT READ" : "MZT SHORT",
-                      (received < 0) ? MZF_PLAYBACK_IO_ERROR : MZF_PLAYBACK_BAD_FILE);
+        if (received < 0)
+        {
+            mzf_set_error_P(PSTR("MZT READ"), MZF_PLAYBACK_IO_ERROR);
+        }
+        else
+        {
+            mzf_set_error_P(PSTR("MZT SHORT"), MZF_PLAYBACK_BAD_FILE);
+        }
         return false;
     }
 
@@ -383,63 +361,218 @@ static bool mzf_read_header_record(void)
     remaining = mzf_file_size - sdcard_file_position();
     if (mzf_record_data_length > remaining)
     {
-        mzf_set_error("MZF LENGTH", MZF_PLAYBACK_BAD_FILE);
+        mzf_set_error_P(PSTR("MZF LENGTH"), MZF_PLAYBACK_BAD_FILE);
         return false;
     }
 
     mzf_record_data_file_end = sdcard_file_position() + mzf_record_data_length;
     mzf_header_offset = 0U;
-    mzf_jumper_offset = 0U;
     mzf_record_data_read = 0UL;
-    mzf_record_data_emitted = 0UL;
     mzf_fifo_reset();
     return true;
 }
 
-static bool mzf_build_ultra_header(void)
+static uint8_t mzf_popcount8(uint8_t value)
 {
-    const uint8_t loader_size = (uint8_t)sizeof(mzf_ultra_loader);
-
-    if ((MZF_HEADER_BYTES - 0x18U) < loader_size)
+    uint8_t count = 0U;
+    while (value != 0U)
     {
-        mzf_set_error("ULTRA LOADER", MZF_PLAYBACK_BAD_FILE);
+        count = (uint8_t)(count + (value & 1U));
+        value >>= 1U;
+    }
+    return count;
+}
+
+static uint8_t mzf_popcount16(uint16_t value)
+{
+    return (uint8_t)(mzf_popcount8((uint8_t)value) +
+                     mzf_popcount8((uint8_t)(value >> 8U)));
+}
+
+static bool mzf_add_half_milliseconds(uint32_t *total, uint32_t amount)
+{
+    if (total == NULL) return false;
+    if ((0xFFFFFFFFUL - *total) < amount)
+    {
+        *total = 0xFFFFFFFFUL;
         return false;
     }
-
-    if ((mzf_format == FILE_FORMAT_MZT) ||
-        (mzf_header[MZF_HEADER_TYPE_OFFSET] != 1U) ||
-        (mzf_file_size != (MZF_HEADER_BYTES + mzf_record_data_length)))
-    {
-        mzf_set_error((mzf_format == FILE_FORMAT_MZT) ? "ULTRA MZT" : "ULTRA TYPE",
-                      MZF_PLAYBACK_BAD_FILE);
-        return false;
-    }
-
-    mzf_jumper[0] = 0x01U; /* LD BC, original data length */
-    mzf_jumper[1] = mzf_header[0x12U];
-    mzf_jumper[2] = mzf_header[0x13U];
-    mzf_jumper[3] = 0x21U; /* LD HL, original load address */
-    mzf_jumper[4] = mzf_header[0x14U];
-    mzf_jumper[5] = mzf_header[0x15U];
-    mzf_jumper[6] = 0x11U; /* LD DE, original execute address */
-    mzf_jumper[7] = mzf_header[0x16U];
-    mzf_jumper[8] = mzf_header[0x17U];
-    mzf_jumper[9] = 0xC3U; /* JP 0x1108, loader in monitor header RAM */
-    mzf_jumper[10] = 0x08U;
-    mzf_jumper[11] = 0x11U;
-
-    mzf_header[0x12U] = MZF_JUMPER_BYTES;
-    mzf_header[0x13U] = 0U;
-    mzf_header[0x16U] = mzf_header[0x14U];
-    mzf_header[0x17U] = mzf_header[0x15U];
-
-    for (uint8_t i = 0U; i < loader_size; ++i)
-    {
-        mzf_header[0x18U + i] = pgm_read_byte(&mzf_ultra_loader[i]);
-    }
-
+    *total += amount;
     return true;
 }
+
+/* Every short pulse is 0.5 ms and every long pulse is 1 ms. This computes
+   one header/data monitor frame exactly from its byte count and number of
+   one bits. The checksum is the same wrapping one-bit count used by the ISR. */
+static bool mzf_add_stage_duration(bool header_stage,
+                                   uint32_t byte_count,
+                                   uint32_t one_count,
+                                   uint16_t checksum,
+                                   uint32_t *half_milliseconds)
+{
+    uint32_t preamble = header_stage ? 6524UL : 6464UL;
+    uint32_t byte_time;
+    uint32_t checksum_and_trailer;
+
+    if (byte_count > 429496729UL)
+    {
+        *half_milliseconds = 0xFFFFFFFFUL;
+        return false;
+    }
+    byte_time = byte_count * 10UL;
+    if ((0xFFFFFFFFUL - byte_time) < one_count)
+    {
+        *half_milliseconds = 0xFFFFFFFFUL;
+        return false;
+    }
+    byte_time += one_count;
+    checksum_and_trailer = 24UL + (uint32_t)mzf_popcount16(checksum);
+
+    return mzf_add_half_milliseconds(half_milliseconds, preamble) &&
+           mzf_add_half_milliseconds(half_milliseconds, byte_time) &&
+           mzf_add_half_milliseconds(half_milliseconds, checksum_and_trailer);
+}
+
+static bool mzf_scan_payload_ones(uint32_t length,
+                                  uint32_t *one_count,
+                                  uint16_t *checksum)
+{
+    uint8_t *work = wav_sample_stream_get_shared_work_buffer();
+
+    if ((one_count == NULL) || (checksum == NULL)) return false;
+    *one_count = 0UL;
+    *checksum = 0U;
+
+    while (length != 0UL)
+    {
+        uint16_t request = (length > MZF_REFILL_BLOCK) ?
+            MZF_REFILL_BLOCK : (uint16_t)length;
+        int16_t received = sdcard_file_read(work, request);
+
+        if (received != (int16_t)request)
+        {
+            mzf_set_error_P((received < 0) ? PSTR("MZF READ") : PSTR("MZF SHORT"),
+                            (received < 0) ? MZF_PLAYBACK_IO_ERROR : MZF_PLAYBACK_BAD_FILE);
+            return false;
+        }
+
+        for (uint16_t index = 0U; index < request; ++index)
+        {
+            uint8_t ones = mzf_popcount8(work[index]);
+            if ((0xFFFFFFFFUL - *one_count) < (uint32_t)ones)
+            {
+                *one_count = 0xFFFFFFFFUL;
+            }
+            else
+            {
+                *one_count += (uint32_t)ones;
+            }
+            *checksum = (uint16_t)(*checksum + (uint16_t)ones);
+        }
+        length -= (uint32_t)request;
+    }
+    return true;
+}
+
+static bool mzf_scan_header_record_duration(uint32_t *half_milliseconds)
+{
+    uint32_t remaining;
+    uint32_t header_ones = 0UL;
+    uint16_t header_checksum = 0U;
+    uint32_t data_ones;
+    uint16_t data_checksum;
+    int16_t received;
+
+    if ((mzf_file_size - sdcard_file_position()) < MZF_HEADER_BYTES)
+    {
+        mzf_set_error_P(PSTR("MZT HEADER"), MZF_PLAYBACK_BAD_FILE);
+        return false;
+    }
+
+    received = sdcard_file_read(mzf_header, MZF_HEADER_BYTES);
+    if (received != (int16_t)MZF_HEADER_BYTES)
+    {
+        mzf_set_error_P((received < 0) ? PSTR("MZT READ") : PSTR("MZT SHORT"),
+                        (received < 0) ? MZF_PLAYBACK_IO_ERROR : MZF_PLAYBACK_BAD_FILE);
+        return false;
+    }
+
+    for (uint8_t index = 0U; index < MZF_HEADER_BYTES; ++index)
+    {
+        uint8_t ones = mzf_popcount8(mzf_header[index]);
+        header_ones += (uint32_t)ones;
+        header_checksum = (uint16_t)(header_checksum + (uint16_t)ones);
+    }
+
+    mzf_record_data_length = mzf_header_data_length();
+    remaining = mzf_file_size - sdcard_file_position();
+    if (mzf_record_data_length > remaining)
+    {
+        mzf_set_error_P(PSTR("MZF LENGTH"), MZF_PLAYBACK_BAD_FILE);
+        return false;
+    }
+
+    if (!mzf_add_stage_duration(true, MZF_HEADER_BYTES, header_ones,
+                                header_checksum, half_milliseconds) ||
+        !mzf_scan_payload_ones(mzf_record_data_length, &data_ones, &data_checksum) ||
+        !mzf_add_stage_duration(false, mzf_record_data_length, data_ones,
+                                data_checksum, half_milliseconds))
+    {
+        return false;
+    }
+    return true;
+}
+
+static bool mzf_calculate_total_duration(void)
+{
+    uint32_t half_milliseconds = 0UL;
+
+    mzf_total_duration_ms = 0UL;
+    if (!sdcard_file_seek(0UL))
+    {
+        mzf_set_error_P(PSTR("MZF SEEK"), MZF_PLAYBACK_IO_ERROR);
+        return false;
+    }
+
+    if (mzf_format == FILE_FORMAT_MZT)
+    {
+        do
+        {
+            if (!mzf_scan_header_record_duration(&half_milliseconds)) return false;
+        }
+        while (sdcard_file_position() < mzf_file_size);
+    }
+    else
+    {
+        uint32_t trailing_length;
+        uint32_t trailing_ones;
+        uint16_t trailing_checksum;
+
+        if (!mzf_scan_header_record_duration(&half_milliseconds)) return false;
+        trailing_length = mzf_file_size - sdcard_file_position();
+        if (trailing_length != 0UL)
+        {
+            if (!mzf_scan_payload_ones(trailing_length, &trailing_ones,
+                                       &trailing_checksum) ||
+                !mzf_add_stage_duration(false, trailing_length, trailing_ones,
+                                        trailing_checksum, &half_milliseconds))
+            {
+                return false;
+            }
+        }
+    }
+
+    mzf_total_duration_ms = (half_milliseconds == 0xFFFFFFFFUL) ?
+        0xFFFFFFFFUL : (half_milliseconds + 1UL) / 2UL;
+
+    if (!sdcard_file_seek(0UL))
+    {
+        mzf_set_error_P(PSTR("MZF SEEK"), MZF_PLAYBACK_IO_ERROR);
+        return false;
+    }
+    return true;
+}
+
 
 static void mzf_begin_normal_stage(mzf_stage_t stage)
 {
@@ -458,21 +591,17 @@ static void mzf_begin_normal_stage(mzf_stage_t stage)
     mzf_boundary_auto_start_ms = 0UL;
     mzf_paused_mid_pulse = false;
     mzf_timer_phase_high = false;
+    mzf_current_pulse_is_long = false;
 
     if (stage == MZF_STAGE_HEADER)
     {
         mzf_header_offset = 0U;
-    }
-    else if (stage == MZF_STAGE_JUMPER)
-    {
-        mzf_jumper_offset = 0U;
     }
 }
 
 static uint32_t mzf_stage_byte_count(void)
 {
     if (mzf_stage == MZF_STAGE_HEADER) return MZF_HEADER_BYTES;
-    if (mzf_stage == MZF_STAGE_JUMPER) return MZF_JUMPER_BYTES;
     if (mzf_stage == MZF_STAGE_DATA) return mzf_record_data_length;
     return 0UL;
 }
@@ -491,17 +620,6 @@ static bool mzf_next_source_byte_from_isr(uint8_t *value)
             return false;
         }
         *value = mzf_header[mzf_header_offset++];
-        mzf_consumed_source_bytes++;
-        return true;
-    }
-
-    if (mzf_stage == MZF_STAGE_JUMPER)
-    {
-        if (mzf_jumper_offset >= MZF_JUMPER_BYTES)
-        {
-            return false;
-        }
-        *value = mzf_jumper[mzf_jumper_offset++];
         return true;
     }
 
@@ -511,8 +629,6 @@ static bool mzf_next_source_byte_from_isr(uint8_t *value)
         {
             return false;
         }
-        mzf_record_data_emitted++;
-        mzf_consumed_source_bytes++;
         return true;
     }
 
@@ -604,7 +720,7 @@ static bool mzf_next_normal_pulse_from_isr(uint16_t *high_ticks,
                 }
                 if (!mzf_next_source_byte_from_isr(&mzf_normal_data))
                 {
-                    mzf_set_error_from_isr("MZF UNDER", MZF_PLAYBACK_UNDERRUN);
+                    mzf_set_error_from_isr_P(PSTR("MZF UNDER"), MZF_PLAYBACK_UNDERRUN);
                     return false;
                 }
                 mzf_normal_bytes_remaining--;
@@ -716,7 +832,7 @@ static bool mzf_next_normal_pulse_from_isr(uint16_t *high_ticks,
                 return false;
 
             default:
-                mzf_set_error_from_isr("MZF STATE", MZF_PLAYBACK_BAD_FILE);
+                mzf_set_error_from_isr_P(PSTR("MZF STATE"), MZF_PLAYBACK_BAD_FILE);
                 return false;
         }
     }
@@ -733,6 +849,7 @@ static bool mzf_start_next_normal_pulse_from_isr(void)
     }
 
     mzf_timer_phase_high = true;
+    mzf_current_pulse_is_long = (high_ticks == MZF_LONG_HIGH_TICKS);
     mz_read_set_fast_from_isr(1U);
     (void)low_ticks;
     mzf_paused_remaining_ticks = high_ticks;
@@ -743,7 +860,7 @@ static bool mzf_start_next_normal_pulse_from_isr(void)
 /* Low ticks are determined from the current high/short-or-long pulse class. */
 static uint16_t mzf_current_low_ticks(void)
 {
-    return (mzf_paused_remaining_ticks == MZF_LONG_HIGH_TICKS) ?
+    return mzf_current_pulse_is_long ?
         MZF_LONG_LOW_TICKS : MZF_SHORT_LOW_TICKS;
 }
 
@@ -780,31 +897,13 @@ static bool mzf_advance_after_boundary(void)
 {
     if (mzf_stage == MZF_STAGE_HEADER)
     {
-        if (mzf_ultra_enabled)
-        {
-            mzf_begin_normal_stage(MZF_STAGE_JUMPER);
-        }
-        else
-        {
-            mzf_begin_normal_stage(MZF_STAGE_DATA);
-        }
-        return true;
-    }
-
-    if (mzf_stage == MZF_STAGE_JUMPER)
-    {
-        mzf_stage = MZF_STAGE_ULTRA_DATA;
-        mzf_boundary_waiting = false;
-        mzf_motor_low_seen = 0U;
-        mzf_boundary_auto_timer_armed = false;
-        mzf_boundary_auto_start_ms = 0UL;
-        mzf_paused_mid_pulse = false;
+        mzf_begin_normal_stage(MZF_STAGE_DATA);
         return true;
     }
 
     if (mzf_stage != MZF_STAGE_DATA)
     {
-        mzf_set_error("MZF STATE", MZF_PLAYBACK_BAD_FILE);
+        mzf_set_error_P(PSTR("MZF STATE"), MZF_PLAYBACK_BAD_FILE);
         return false;
     }
 
@@ -822,7 +921,6 @@ static bool mzf_advance_after_boundary(void)
         mzf_record_data_length = mzf_file_size - sdcard_file_position();
         mzf_record_data_file_end = mzf_file_size;
         mzf_record_data_read = 0UL;
-        mzf_record_data_emitted = 0UL;
         mzf_fifo_reset();
         if (!mzf_prefill_data())
         {
@@ -835,92 +933,6 @@ static bool mzf_advance_after_boundary(void)
     mzf_state = MZF_PLAYBACK_FINISHED;
     mz_sense_set(true);
     return true;
-}
-
-static uint8_t mzf_ultra_wire_byte(uint8_t value)
-{
-    /* Equivalent to the prior AVR insert_bits(0x54321076, value, 0): ROL 2. */
-    return (uint8_t)((value << 2U) | (value >> 6U));
-}
-
-static bool mzf_wait_write_level(bool level)
-{
-    uint32_t start = micros();
-
-    while (mz_write_get() != level)
-    {
-        if ((uint32_t)(micros() - start) >= MZF_ULTRA_HANDSHAKE_TIMEOUT_US)
-        {
-            return false;
-        }
-    }
-    return true;
-}
-
-static bool mzf_ultra_send_byte(uint8_t source)
-{
-    uint8_t data = mzf_ultra_wire_byte(source);
-
-    for (uint8_t pair = 0U; pair < 4U; ++pair)
-    {
-        if (!mzf_wait_write_level(false)) return false;
-        mz_read_set_fast((data & 0x80U) != 0U);
-        mz_sense_set_fast(false);
-
-        if (!mzf_wait_write_level(true)) return false;
-        mz_read_set_fast((data & 0x40U) != 0U);
-        mz_sense_set_fast(true);
-
-        data <<= 2U;
-    }
-    return true;
-}
-
-static void mzf_run_ultra_transfer(void)
-{
-    uint8_t *work;
-
-    if ((mzf_record_data_read != 0UL) || (mzf_record_data_length == 0UL && mzf_file_size > MZF_HEADER_BYTES))
-    {
-        mzf_set_error("ULTRA STATE", MZF_PLAYBACK_ULTRA_ERROR);
-        return;
-    }
-
-    mz_read_set_fast(true);
-    mz_sense_set_fast(true);
-    delay(100U);
-
-    work = wav_sample_stream_get_shared_work_buffer();
-    while (mzf_record_data_read < mzf_record_data_length)
-    {
-        uint16_t request = (uint16_t)(mzf_record_data_length - mzf_record_data_read);
-        int16_t received;
-
-        if (request > MZF_REFILL_BLOCK) request = MZF_REFILL_BLOCK;
-        received = sdcard_file_read(work, request);
-        if (received != (int16_t)request)
-        {
-            mzf_set_error((received < 0) ? "ULTRA READ" : "ULTRA SHORT",
-                          (received < 0) ? MZF_PLAYBACK_IO_ERROR : MZF_PLAYBACK_ULTRA_ERROR);
-            return;
-        }
-
-        for (int16_t i = 0; i < received; ++i)
-        {
-            if (!mzf_ultra_send_byte(work[i]))
-            {
-                mzf_set_error("ULTRA TIMEOUT", MZF_PLAYBACK_ULTRA_ERROR);
-                return;
-            }
-            mzf_record_data_read++;
-            mzf_record_data_emitted++;
-            mzf_consumed_source_bytes++;
-        }
-    }
-
-    mz_read_set_fast(false);
-    mz_sense_set_fast(true);
-    mzf_state = MZF_PLAYBACK_FINISHED;
 }
 
 /*
@@ -975,16 +987,9 @@ static void mzf_service_boundary_auto_continue(void)
         return;
     }
 
-    if (mzf_stage == MZF_STAGE_ULTRA_DATA)
-    {
-        /* The injected loader now owns READ/WRITE/SENSE. */
-        mzf_run_ultra_transfer();
-        return;
-    }
-
     if (!mzf_start_normal_output() && (mzf_state == MZF_PLAYBACK_RUNNING))
     {
-        mzf_set_error("MZF START", MZF_PLAYBACK_BAD_FILE);
+        mzf_set_error_P(PSTR("MZF START"), MZF_PLAYBACK_BAD_FILE);
     }
 }
 
@@ -994,52 +999,40 @@ void mzf_playback_init(void)
     mzf_state = MZF_PLAYBACK_STOPPED;
     mzf_error_text[0] = '\0';
     mzf_format = FILE_FORMAT_UNKNOWN;
-    mzf_play_mode = MENU_PLAY_MODE_NORMAL;
-    mzf_ultra_enabled = false;
     mzf_file_size = 0UL;
+    mzf_total_duration_ms = 0UL;
     mzf_record_data_length = 0UL;
     mzf_record_data_file_end = 0UL;
     mzf_record_data_read = 0UL;
-    mzf_record_data_emitted = 0UL;
-    mzf_consumed_source_bytes = 0UL;
     mzf_stage = MZF_STAGE_NONE;
     mzf_boundary_waiting = false;
     mzf_motor_low_seen = 0U;
     mzf_boundary_auto_timer_armed = false;
     mzf_boundary_auto_start_ms = 0UL;
     mzf_timer_phase_high = false;
+    mzf_current_pulse_is_long = false;
     mzf_paused_mid_pulse = false;
     mzf_paused_remaining_ticks = 0U;
     mzf_fifo_reset();
 }
 
 bool mzf_playback_prepare(const char *path,
-                          file_format_t format,
-                          menu_play_mode_t play_mode)
+                          file_format_t format)
 {
     mzf_playback_stop();
     mzf_error_text[0] = '\0';
 
     if ((path == NULL) || !file_format_is_sharp_tape(format))
     {
-        mzf_set_error("MZF ARG", MZF_PLAYBACK_BAD_FILE);
+        mzf_set_error_P(PSTR("MZF ARG"), MZF_PLAYBACK_BAD_FILE);
         return false;
     }
 
     mzf_format = format;
-    mzf_play_mode = play_mode;
-
-    /*
-        NORMAL monitor PWM and ULTRA FAST READ/WRITE/SENSE data both use
-        the fixed native Sharp polarity.  The MZF API intentionally has no
-        invert parameter, preventing the global PLAY setting from reaching
-        this transport.
-    */
-    mzf_ultra_enabled = (play_mode == MENU_PLAY_MODE_ULTRA_FAST);
 
     if (!sdcard_file_open_read(path))
     {
-        mzf_set_error("MZF OPEN", MZF_PLAYBACK_IO_ERROR);
+        mzf_set_error_P(PSTR("MZF OPEN"), MZF_PLAYBACK_IO_ERROR);
         return false;
     }
 
@@ -1047,25 +1040,17 @@ bool mzf_playback_prepare(const char *path,
     if (mzf_file_size < MZF_HEADER_BYTES)
     {
         sdcard_file_close();
-        mzf_set_error("MZF SHORT", MZF_PLAYBACK_BAD_FILE);
+        mzf_set_error_P(PSTR("MZF SHORT"), MZF_PLAYBACK_BAD_FILE);
         return false;
     }
 
-    if (!mzf_read_header_record())
+    if (!mzf_calculate_total_duration() || !mzf_read_header_record())
     {
         sdcard_file_close();
         return false;
     }
 
-    if (mzf_ultra_enabled)
-    {
-        if (!mzf_build_ultra_header())
-        {
-            sdcard_file_close();
-            return false;
-        }
-    }
-    else if (!mzf_prefill_data())
+    if (!mzf_prefill_data())
     {
         sdcard_file_close();
         return false;
@@ -1085,11 +1070,6 @@ bool mzf_playback_start(void)
 
     mzf_state = MZF_PLAYBACK_RUNNING;
     mz_sense_set(false);
-
-    if (mzf_stage == MZF_STAGE_ULTRA_DATA)
-    {
-        return true;
-    }
 
     if (mzf_paused_mid_pulse)
     {
@@ -1113,12 +1093,6 @@ bool mzf_playback_pause(void)
         return false;
     }
 
-    if (mzf_stage == MZF_STAGE_ULTRA_DATA)
-    {
-        /* The live loader protocol is deliberately non-preemptible. */
-        return false;
-    }
-
     if (mzf_boundary_waiting)
     {
         if (!mzf_advance_after_boundary())
@@ -1128,19 +1102,6 @@ bool mzf_playback_pause(void)
         if (mzf_state == MZF_PLAYBACK_FINISHED)
         {
             return true;
-        }
-
-        /*
-            The original ULTRA FAST transport begins immediately when the
-            monitor ends the 12-byte jumper block and drops MOTOR.  The
-            injected loader then owns READ/WRITE/SENSE; waiting for a later
-            MOTOR HIGH here would deadlock that protocol.
-        */
-        if (mzf_stage == MZF_STAGE_ULTRA_DATA)
-        {
-            mzf_state = MZF_PLAYBACK_RUNNING;
-            mzf_run_ultra_transfer();
-            return mzf_state == MZF_PLAYBACK_FINISHED;
         }
 
         mzf_state = MZF_PLAYBACK_PAUSED;
@@ -1179,15 +1140,14 @@ void mzf_playback_stop(void)
     mzf_boundary_auto_timer_armed = false;
     mzf_boundary_auto_start_ms = 0UL;
     mzf_timer_phase_high = false;
+    mzf_current_pulse_is_long = false;
     mzf_paused_mid_pulse = false;
     mzf_paused_remaining_ticks = 0U;
-    mzf_ultra_enabled = false;
     mzf_file_size = 0UL;
+    mzf_total_duration_ms = 0UL;
     mzf_record_data_length = 0UL;
     mzf_record_data_file_end = 0UL;
     mzf_record_data_read = 0UL;
-    mzf_record_data_emitted = 0UL;
-    mzf_consumed_source_bytes = 0UL;
     mz_sense_set(true);
 }
 
@@ -1195,12 +1155,6 @@ void mzf_playback_service(void)
 {
     if (mzf_state != MZF_PLAYBACK_RUNNING)
     {
-        return;
-    }
-
-    if (mzf_stage == MZF_STAGE_ULTRA_DATA)
-    {
-        mzf_run_ultra_transfer();
         return;
     }
 
@@ -1247,31 +1201,21 @@ uint8_t mzf_playback_get_buffer_fill_percent(void)
     return (percent > 100UL) ? 100U : (uint8_t)percent;
 }
 
-uint32_t mzf_playback_get_consumed_bytes(void)
+uint32_t mzf_playback_get_total_duration_ms(void)
 {
-    uint32_t result;
-    ATOMIC_BLOCK(ATOMIC_RESTORESTATE)
-    {
-        result = mzf_consumed_source_bytes;
-    }
-    return result;
+    return mzf_total_duration_ms;
 }
-
-uint32_t mzf_playback_get_total_bytes(void) { return mzf_file_size; }
 
 /*
     Called by the sole TIMER3_COMPB_vect dispatcher in edge_playback.cpp.
-    Return true only when NORMAL MZF/MZT output currently owns Timer3.
-    Never stop or reconfigure Timer3 for a different source: that is what
-    prevented LEP/L16 playback from being accidentally disabled by an idle
-    MZF module.
+    Called only while the Timer3B owner is MZF.  The shared dispatcher keeps
+    idle MZF state from touching an active LEP/L16 transport.
 */
 bool mzf_playback_timer3_compb_from_isr(void)
 {
     uint16_t low_ticks;
 
-    if ((mzf_state != MZF_PLAYBACK_RUNNING) ||
-        (mzf_stage == MZF_STAGE_ULTRA_DATA))
+    if (mzf_state != MZF_PLAYBACK_RUNNING)
     {
         return false;
     }
