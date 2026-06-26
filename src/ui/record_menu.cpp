@@ -14,15 +14,16 @@ typedef enum
 
 typedef enum
 {
-    RECORD_TYPE_LEP = 0,
-    RECORD_TYPE_L16,
+    /* Menu order: default WAV 44 kHz -> WAV 22 kHz -> L16 -> LEP. */
+    RECORD_TYPE_WAV_44K = 0,
     RECORD_TYPE_WAV_22K,
-    RECORD_TYPE_WAV_44K,
+    RECORD_TYPE_L16,
+    RECORD_TYPE_LEP,
     RECORD_TYPE_COUNT
 } record_type_t;
 
 static record_menu_item_t selected_item = RECORD_MENU_ITEM_TYPE;
-static record_type_t record_type = RECORD_TYPE_WAV_22K;
+static record_type_t record_type = RECORD_TYPE_WAV_44K;
 static record_control_mode_t control_mode = RECORD_CONTROL_MOTOR;
 
 static const char text_rec_type[] PROGMEM = ">REC TYPE";
@@ -81,10 +82,10 @@ static PGM_P record_type_label_P(void)
 {
     switch (record_type)
     {
-        case RECORD_TYPE_LEP: return text_lep;
-        case RECORD_TYPE_L16: return text_l16;
-        case RECORD_TYPE_WAV_22K: return text_wav22;
         case RECORD_TYPE_WAV_44K: return text_wav44;
+        case RECORD_TYPE_WAV_22K: return text_wav22;
+        case RECORD_TYPE_L16: return text_l16;
+        case RECORD_TYPE_LEP: return text_lep;
         default: return text_unknown;
     }
 }
@@ -107,7 +108,7 @@ static void toggle_current(void)
 void record_menu_init(void)
 {
     selected_item = RECORD_MENU_ITEM_TYPE;
-    record_type = RECORD_TYPE_WAV_22K;
+    record_type = RECORD_TYPE_WAV_44K;
     control_mode = RECORD_CONTROL_MOTOR;
 }
 

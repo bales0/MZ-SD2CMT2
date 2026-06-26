@@ -7,6 +7,8 @@
 #include "../record/record_engine.h"
 
 static const char text_rec_fallback[] PROGMEM = "REC";
+static const char text_wav_rate_22k[] PROGMEM = "22k";
+static const char text_wav_rate_44k[] PROGMEM = "44k";
 static const char text_wait_signal[] PROGMEM = "WAIT SIGNAL B%03u";
 static const char text_wait_motor[] PROGMEM = "WAIT MOTOR B%03u";
 static const char text_recording[] PROGMEM = "REC %02lu:%02lu B%03u";
@@ -54,6 +56,57 @@ static void copy_filename_line(char *destination, const char *filename)
     destination[16] = '\0';
 }
 
+static PGM_P wav_rate_label_P(uint32_t sample_rate)
+{
+    return (sample_rate >= 40000UL) ? text_wav_rate_44k : text_wav_rate_22k;
+}
+
+/* RECxxxx.WAV is exactly 11 characters. The compact flash suffix is right
+   aligned to the final LCD columns: REC0001.WAV  44k. */
+static void copy_wav_filename_line(char *destination, const char *filename,
+                                   uint32_t sample_rate)
+{
+    char rate[4];
+    uint8_t index = 0U;
+    uint8_t rate_length = 0U;
+    uint8_t rate_start;
+
+    flash_text_copy(rate, sizeof(rate), wav_rate_label_P(sample_rate));
+    while ((rate_length < (uint8_t)(sizeof(rate) - 1U)) &&
+           (rate[rate_length] != '\0'))
+    {
+        ++rate_length;
+    }
+    rate_start = (uint8_t)(16U - rate_length);
+
+    if ((filename == NULL) || (filename[0] == '\0'))
+    {
+        flash_text_copy(destination, 17U, text_rec_fallback);
+        while ((destination[index] != '\0') && (index < rate_start))
+        {
+            ++index;
+        }
+    }
+    else
+    {
+        while ((index < rate_start) && (filename[index] != '\0'))
+        {
+            destination[index] = filename[index];
+            ++index;
+        }
+    }
+
+    while (index < rate_start)
+    {
+        destination[index++] = ' ';
+    }
+    for (uint8_t i = 0U; i < rate_length; ++i)
+    {
+        destination[index++] = rate[i];
+    }
+    destination[16] = '\0';
+}
+
 record_screen_action_t record_screen_handle_event(button_event_t event)
 {
     switch (event)
@@ -79,8 +132,16 @@ void record_screen_render(void)
     uint32_t seconds = record_engine_get_elapsed_seconds();
     char pause_indicator = record_engine_get_pause_indicator();
 
-    /* The actual RECxxxx filename deliberately remains in row 0 after MOTOR LOW. */
-    copy_filename_line(line0, filename);
+    /* The actual RECxxxx filename deliberately remains in row 0 after MOTOR LOW.
+       WAV adds the active configured sample-rate suffix without consuming RAM. */
+    if (record_engine_get_format() == FILE_FORMAT_WAV)
+    {
+        copy_wav_filename_line(line0, filename, record_engine_get_wav_sample_rate());
+    }
+    else
+    {
+        copy_filename_line(line0, filename);
+    }
     copy_filename_line(filename_copy, filename);
 
     switch (state)

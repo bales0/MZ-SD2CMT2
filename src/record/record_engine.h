@@ -41,6 +41,9 @@ bool record_engine_cancelled_file_removed(void);
 uint8_t record_engine_get_buffer_fill_percent(void);
 uint32_t record_engine_get_elapsed_seconds(void);
 
+/* Returns the configured WAV sample rate, or 0 for LEP/L16 recording. */
+uint32_t record_engine_get_wav_sample_rate(void);
+
 /* Returns 'M' for MOTOR pause, 'U' for user pause, or '\0' when not paused. */
 char record_engine_get_pause_indicator(void);
 

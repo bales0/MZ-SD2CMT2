@@ -10,7 +10,7 @@
 #include "../drivers/flash_text.h"
 
 static record_engine_state_t engine_state = RECORD_ENGINE_STOPPED;
-static record_engine_config_t engine_config = { FILE_FORMAT_WAV, 22050UL, RECORD_CONTROL_MOTOR };
+static record_engine_config_t engine_config = { FILE_FORMAT_WAV, 44100UL, RECORD_CONTROL_MOTOR };
 static char engine_directory[96];
 static char engine_error[17];
 static bool capture_started = false;
@@ -219,7 +219,7 @@ void record_engine_init(void)
     edge_record_engine_init();
     engine_state = RECORD_ENGINE_STOPPED;
     engine_config.format = FILE_FORMAT_WAV;
-    engine_config.wav_sample_rate = 22050UL;
+    engine_config.wav_sample_rate = 44100UL;
     engine_config.control_mode = RECORD_CONTROL_MOTOR;
     engine_directory[0] = '\0';
     engine_error[0] = '\0';
@@ -489,6 +489,13 @@ uint32_t record_engine_get_elapsed_seconds(void)
     if (end_ms < active_started_ms + paused_total_ms) return 0UL;
     return (end_ms - active_started_ms - paused_total_ms) / 1000UL;
 }
+
+uint32_t record_engine_get_wav_sample_rate(void)
+{
+    return (engine_config.format == FILE_FORMAT_WAV) ?
+        engine_config.wav_sample_rate : 0UL;
+}
+
 char record_engine_get_pause_indicator(void)
 {
     if (engine_state != RECORD_ENGINE_PAUSED) return '\0';
