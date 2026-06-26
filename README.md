@@ -86,139 +86,37 @@ Note: SDI/SDO/SSI/SSO are signals used for Ultra-fast mode.
 - SSI: Serial Synchronisation Input, connected to MOTOR. Only used when MZ writes.
 - SSO: Serial Synchronisation Output, connected to SENSE. Only used when MZ reads.
 
-## Function
 
+Drop some MZF/M12/MZT files onto a FAT32 formatted SD card, plug it into the mz-sd²cmt, and power on.
 
-SD CARD BROWSER
+An Ultra-fast mode is provided with MZF-like files to allow around 20000 baud transfer. You must press `RIGHT` button to toggle Ultra-fast mode (disabled by default).  
 
-───────────────
+The following picture is showing the ultra-fast protocol when MZ reads:
+![ultra-fast mode](https://user-images.githubusercontent.com/56785/43679133-2cf8ead4-9820-11e8-97a8-876965b69e71.jpg)
 
+Legend: `*` means the MZ reads the READ bit and `><` means Arduino is setting the next READ bit.
+Notes:
+- CS is also named SSO.
+- PC5 is connected to SDO as the current bit data when MZ reads.
+- PC1 is connected to SDI as a read acknowledge sent by MZ.
+- PC4 is ignored by Arduino when MZ reads. 
 
-▲ / ▼       Move through the list
+## Old usage
+Drop some LEP or WAV files (converted MZF Files through MZF2LEP tool) onto a FAT32 formatted SD card, plug it into the mz-sd²cmt, and power on.
 
-SELECT      Open folder / select file
+Tool mzf2lep can convert a MZF/MZT/M12 file into a LEP and/or WAV file in five ways:
+- conventional tape data (2 header blocks followed by 2 data blocks) at 1200 baud
+- fast tape data (shorter gaps, 1 header block followed by a 1 data block)
+- turbo x2 tape data (first turbo loader as a fast tape data then 1 data block read twice as fast)
+- turbo x3 tape data (first turbo loader as a fast tape data then 1 data block read trice as fast)
+- turbo x4 tape data (first turbo loader as a fast tape data then 1 data block read four times as fast)
 
-LEFT        Go back one folder
+Note that WAV files have a limitation: 8-bit mono channel. The frequency can be any, included the usual 44.1KHz and probably even 48KHz. Yes, it works on a 16MHz AVR and probably even on a 8MHz AVR too.
 
-LEFT hold   Return to SD card root "/"
+## Issues
 
+LEP file is supported. Suffixes .LEP and .L16 are for time resolution 16µs and .L50 for 50µs (As the original LEP from SDLEP-READER - Daniel Coulon). The only interest is for a program needing to read severals blocks. Maybe the same thing can be handled through a MZT file (with multiple data blocks) by listening to MOTOR signal to separate block readings. But unlike LEP, there is no way to say whether the next block is a header block or a data block.
 
-Supported playback files:
-WAV, LEP, L16, MZF, MZT, M12
+Some programs are a set of blocks in the tape: the first program will read the rest in one or several blocks. Right now, MZF, M12 and MZT don't handle them correctly (no indication whether the next block is a header or a data so you can emit the right prolog). Maybe defining a new binary file with those indication may help to allow reading multiple data. 
 
-
-
-MENU
-
-────
-
-
-Hold SELECT   PLAY MENU
-
-Hold RIGHT    RECORD MENU
-
-▲ / ▼         Move through menu items
-
-SELECT        Change selected option
-
-LEFT          Return to browser
-
-
-
-PLAYBACK
-
-────────
-
-
-SELECT        Start / pause / resume
-
-LEFT          Stop playback and return to browser
-
-PLAY CTRL:
-
-MOTOR         Start and pause controlled by MZ MOTOR signal
-
-MANUAL        Controlled only by SELECT button
-
-
-Important:
- 
-- INVERT SIG. works for WAV, LEP and L16, not for MZF, MZT, M12
-
-
-
-RECORDING
-
-─────────
-
-
-RIGHT         Start recording using current settings
-
-SELECT        Pause / resume
-
-LEFT          Save recording and return
-
-Hold LEFT     Cancel and delete current recording
-
-
-REC MODE:
-
-MOTOR         Start/pause controlled by MOTOR signal
-
-AUTO          Starts on WRITE activity, stops after inactivity
-
-MANUAL        Recording starts immediately
-
-REC TYPE:
-
-WAV 22kHz     Smaller WAV file
-
-WAV 44kHz     Higher-quality WAV
-
-LEP 50us      Edge recording
-
-L16 16us      Higher-resolution edge recording
-
-
-
-RECORDED FILES
-
-──────────────
-
-
-Saved in:
-
-/RECORDINGS
-
-Examples:
-
-REC0001.WAV
-
-REC0002.LEP
-
-REC0003.L16
-
-Numbering is shared by all recording types.
-
-
-
-DISPLAY
-
-───────
-
-
-WAIT MOTOR    Waiting for MOTOR signal from MZ
-
-WAIT SIGNAL   AUTO mode waiting for WRITE activity
-
-PLY 042%      Playback in progress
-
-PAU 042%      Playback paused
-
-REC 01:23     Recording in progress
-
-SAVING        Saving file
-
-SAVED         Finished
-
-ERR ...       Error
+Turbo x2, x3 and x4 are available through WAV/LEP files built by MZF2LEP tool. However, Turbo x4 may not work perfectly with big program to load.
