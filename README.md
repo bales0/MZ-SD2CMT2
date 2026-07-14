@@ -41,7 +41,7 @@ Arduino MEGA Pins:
  TX2  | 16     | <-        | MZCMT MOTOR
  OC3B | 2      | ->        | MZCMT READ
  TX1  | 18     | ->        | MZCMT SENSE
- RX1  | 19     | ->        | MZCMT LED
+ *RX1 | 19     | ->        | MZCMT LED - not supported
  *SDA | 20     | ->        | OLED SDA (I²C) - not supported
  *SCL | 21     | ->        | OLED SCK (I²C) - not supported
  .    | 50     | <-        | SD MISO (SD Card MISO PIN)
