@@ -8,15 +8,18 @@ typedef enum
 {
     MENU_ITEM_INVERT_SIGNAL = 0,
     MENU_ITEM_PLAY_CONTROL,
+    MENU_ITEM_ULTRAFAST,
     MENU_ITEM_COUNT
 } menu_item_t;
 
 static menu_item_t selected_item = MENU_ITEM_INVERT_SIGNAL;
 static bool invert_signal = false;
+static bool ultrafast_enabled = false;
 static play_control_mode_t play_control_mode = PLAY_CONTROL_MOTOR;
 
 static const char text_invert[] PROGMEM = ">INVERT SIG.";
 static const char text_play_control[] PROGMEM = ">PLAY CTRL";
+static const char text_ultrafast[] PROGMEM = ">ULTRAFAST";
 static const char text_on[] PROGMEM = " ON";
 static const char text_off[] PROGMEM = " OFF";
 static const char text_motor[] PROGMEM = " MOTOR";
@@ -54,6 +57,7 @@ void menu_init(void)
 {
     selected_item = MENU_ITEM_INVERT_SIGNAL;
     invert_signal = false;
+    ultrafast_enabled = false;
     play_control_mode = PLAY_CONTROL_MOTOR;
 }
 
@@ -71,10 +75,18 @@ menu_action_t menu_handle_event(button_event_t event)
             break;
         case BUTTON_EVENT_SELECT_SHORT:
             if (selected_item == MENU_ITEM_INVERT_SIGNAL)
+            {
                 invert_signal = !invert_signal;
-            else
+            }
+            else if (selected_item == MENU_ITEM_PLAY_CONTROL)
+            {
                 play_control_mode = (play_control_mode == PLAY_CONTROL_MOTOR) ?
                     PLAY_CONTROL_MANUAL : PLAY_CONTROL_MOTOR;
+            }
+            else
+            {
+                ultrafast_enabled = !ultrafast_enabled;
+            }
             break;
         case BUTTON_EVENT_LEFT_SHORT:
         case BUTTON_EVENT_LEFT_LONG:
@@ -94,10 +106,18 @@ void menu_render(void)
         return;
     }
 
-    lcd_print_fixed_P(0U, text_play_control);
-    lcd_print_fixed_P(1U, play_control_mode == PLAY_CONTROL_MANUAL ?
-                      text_manual : text_motor);
+    if (selected_item == MENU_ITEM_PLAY_CONTROL)
+    {
+        lcd_print_fixed_P(0U, text_play_control);
+        lcd_print_fixed_P(1U, play_control_mode == PLAY_CONTROL_MANUAL ?
+                          text_manual : text_motor);
+        return;
+    }
+
+    lcd_print_fixed_P(0U, text_ultrafast);
+    lcd_print_fixed_P(1U, ultrafast_enabled ? text_on : text_off);
 }
 
 bool menu_get_invert_signal(void) { return invert_signal; }
+bool menu_get_ultrafast_enabled(void) { return ultrafast_enabled; }
 play_control_mode_t menu_get_play_control_mode(void) { return play_control_mode; }

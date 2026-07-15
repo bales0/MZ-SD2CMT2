@@ -1,5 +1,6 @@
 #include "mzf_playback.h"
 #include "timer3b_owner.h"
+#include "mzf_ultrafast.h"
 
 #include <Arduino.h>
 #include <avr/io.h>
@@ -70,7 +71,8 @@ typedef enum
 {
     MZF_STAGE_NONE = 0,
     MZF_STAGE_HEADER,
-    MZF_STAGE_DATA
+    MZF_STAGE_DATA,
+    MZF_STAGE_ULTRAFAST
 } mzf_stage_t;
 
 typedef enum
@@ -98,7 +100,7 @@ static file_format_t mzf_format = FILE_FORMAT_UNKNOWN;
 /* MZF/MZT/M12 always use the native Sharp CMT polarity. */
 
 static uint8_t mzf_header[MZF_HEADER_BYTES];
-static uint8_t mzf_header_offset = 0U;
+static volatile uint8_t mzf_header_offset = 0U;
 
 static volatile uint16_t mzf_fifo_read_sequence = 0U;
 static volatile uint16_t mzf_fifo_write_sequence = 0U;
@@ -137,6 +139,21 @@ static uint32_t mzf_boundary_auto_start_ms = 0UL;
 static void mzf_set_error_P(PGM_P text, mzf_playback_state_t state)
 {
     flash_text_copy(mzf_error_text, sizeof(mzf_error_text), text);
+    mzf_state = (uint8_t)state;
+    mz_sense_set(true);
+}
+
+static void mzf_set_error(const char *text, mzf_playback_state_t state)
+{
+    if (text == NULL)
+    {
+        flash_text_copy(mzf_error_text, sizeof(mzf_error_text), PSTR("MZF ERROR"));
+    }
+    else
+    {
+        strncpy(mzf_error_text, text, sizeof(mzf_error_text) - 1U);
+        mzf_error_text[sizeof(mzf_error_text) - 1U] = '\0';
+    }
     mzf_state = (uint8_t)state;
     mz_sense_set(true);
 }
@@ -324,6 +341,37 @@ static bool mzf_prefill_data(void)
         }
     }
     return (mzf_record_data_length == 0UL) || (mzf_fifo_used_snapshot() != 0U);
+}
+
+static bool mzf_prepare_ultrafast_loader_data(void)
+{
+    uint8_t *work = wav_sample_stream_get_shared_work_buffer();
+    uint16_t length = mzf_ultrafast_build_loader(work, MZF_REFILL_BLOCK);
+    uint16_t write_sequence = 0U;
+
+    if ((length == 0U) || (length > MZF_FIFO_CAPACITY))
+    {
+        mzf_set_error_P(PSTR("UF LOADER"), MZF_PLAYBACK_BAD_FILE);
+        return false;
+    }
+
+    for (uint16_t i = 0U; i < length; ++i)
+    {
+        wav_sample_stream_isr_bytes[write_sequence & MZF_FIFO_MASK] = work[i];
+        write_sequence = (uint16_t)(write_sequence + 1U);
+    }
+
+    ATOMIC_BLOCK(ATOMIC_RESTORESTATE)
+    {
+        mzf_fifo_read_sequence = 0U;
+        mzf_fifo_write_sequence = write_sequence;
+        mzf_fifo_source_finished = 1U;
+    }
+
+    mzf_record_data_length = length;
+    mzf_record_data_read = length;
+    mzf_record_data_file_end = 0UL;
+    return true;
 }
 
 static uint32_t mzf_header_data_length(void)
@@ -816,6 +864,14 @@ static bool mzf_next_normal_pulse_from_isr(uint16_t *high_ticks,
                     Earlier records remain at the boundary and advance only
                     after the monitor turns MOTOR off.
                 */
+                if ((mzf_stage == MZF_STAGE_DATA) && mzf_ultrafast_is_active())
+                {
+                    mzf_boundary_waiting = true;
+                    mzf_stop_timer_from_isr();
+                    mz_read_set_fast_from_isr(0U);
+                    return false;
+                }
+
                 if ((mzf_stage == MZF_STAGE_DATA) &&
                     (mzf_record_data_file_end >= mzf_file_size))
                 {
@@ -873,6 +929,16 @@ static bool mzf_start_normal_output(void)
     return (mzf_state == MZF_PLAYBACK_RUNNING) && !mzf_boundary_waiting;
 }
 
+static bool mzf_start_ultrafast_output(void)
+{
+    if (!mzf_ultrafast_begin())
+    {
+        mzf_set_error(mzf_ultrafast_get_error_text(), MZF_PLAYBACK_IO_ERROR);
+        return false;
+    }
+    return true;
+}
+
 static bool mzf_start_next_mzt_record(void)
 {
     if (sdcard_file_position() >= mzf_file_size)
@@ -905,6 +971,16 @@ static bool mzf_advance_after_boundary(void)
     {
         mzf_set_error_P(PSTR("MZF STATE"), MZF_PLAYBACK_BAD_FILE);
         return false;
+    }
+
+    if (mzf_ultrafast_is_active())
+    {
+        mzf_stage = MZF_STAGE_ULTRAFAST;
+        mzf_boundary_waiting = false;
+        mzf_motor_low_seen = 0U;
+        mzf_boundary_auto_timer_armed = false;
+        mzf_boundary_auto_start_ms = 0UL;
+        return true;
     }
 
     if (mzf_format == FILE_FORMAT_MZT)
@@ -944,6 +1020,7 @@ static bool mzf_advance_after_boundary(void)
 */
 static void mzf_service_boundary_auto_continue(void)
 {
+    bool ultrafast_boundary;
     uint32_t now;
 
     if (!mzf_boundary_waiting || (mzf_state != MZF_PLAYBACK_RUNNING))
@@ -951,30 +1028,36 @@ static void mzf_service_boundary_auto_continue(void)
         return;
     }
 
+    ultrafast_boundary = (mzf_stage == MZF_STAGE_DATA) &&
+                         mzf_ultrafast_is_active();
+
     /* Let the controller preserve the native MOTOR-low pause behavior. */
-    if (!mz_motor_get())
+    if (!ultrafast_boundary && !mz_motor_get())
     {
         return;
     }
 
-    now = millis();
-    if (!mzf_boundary_auto_timer_armed)
+    if (!ultrafast_boundary)
     {
-        mzf_boundary_auto_start_ms = now;
-        mzf_boundary_auto_timer_armed = true;
+        now = millis();
+        if (!mzf_boundary_auto_timer_armed)
+        {
+            mzf_boundary_auto_start_ms = now;
+            mzf_boundary_auto_timer_armed = true;
 
-        /* A low edge observed at timer precision has already completed the
-           legacy boundary; do not add an unnecessary silent delay. */
-        if (mzf_motor_low_seen == 0U)
+            /* A low edge observed at timer precision has already completed the
+               legacy boundary; do not add an unnecessary silent delay. */
+            if (mzf_motor_low_seen == 0U)
+            {
+                return;
+            }
+        }
+        else if ((mzf_motor_low_seen == 0U) &&
+                 ((uint32_t)(now - mzf_boundary_auto_start_ms) <
+                  MZF_BOUNDARY_AUTO_CONTINUE_MS))
         {
             return;
         }
-    }
-    else if ((mzf_motor_low_seen == 0U) &&
-             ((uint32_t)(now - mzf_boundary_auto_start_ms) <
-              MZF_BOUNDARY_AUTO_CONTINUE_MS))
-    {
-        return;
     }
 
     if (!mzf_advance_after_boundary())
@@ -984,6 +1067,15 @@ static void mzf_service_boundary_auto_continue(void)
 
     if (mzf_state == MZF_PLAYBACK_FINISHED)
     {
+        return;
+    }
+
+    if (mzf_stage == MZF_STAGE_ULTRAFAST)
+    {
+        if (!mzf_start_ultrafast_output() && (mzf_state == MZF_PLAYBACK_RUNNING))
+        {
+            mzf_set_error_P(PSTR("UF START"), MZF_PLAYBACK_BAD_FILE);
+        }
         return;
     }
 
@@ -1014,10 +1106,12 @@ void mzf_playback_init(void)
     mzf_paused_mid_pulse = false;
     mzf_paused_remaining_ticks = 0U;
     mzf_fifo_reset();
+    mzf_ultrafast_reset();
 }
 
 bool mzf_playback_prepare(const char *path,
-                          file_format_t format)
+                          file_format_t format,
+                          bool ultrafast_enabled)
 {
     mzf_playback_stop();
     mzf_error_text[0] = '\0';
@@ -1050,7 +1144,18 @@ bool mzf_playback_prepare(const char *path,
         return false;
     }
 
-    if (!mzf_prefill_data())
+    if (mzf_ultrafast_prepare(format, ultrafast_enabled, mzf_header,
+                              mzf_file_size, sdcard_file_position()))
+    {
+        mzf_ultrafast_patch_loader_header(mzf_header);
+        if (!mzf_prepare_ultrafast_loader_data())
+        {
+            sdcard_file_close();
+            return false;
+        }
+        mzf_total_duration_ms = 0UL;
+    }
+    else if (!mzf_prefill_data())
     {
         sdcard_file_close();
         return false;
@@ -1069,7 +1174,10 @@ bool mzf_playback_start(void)
     }
 
     mzf_state = MZF_PLAYBACK_RUNNING;
-    mz_sense_set(false);
+    if (mzf_stage != MZF_STAGE_ULTRAFAST)
+    {
+        mz_sense_set(false);
+    }
 
     if (mzf_paused_mid_pulse)
     {
@@ -1079,6 +1187,11 @@ bool mzf_playback_start(void)
         mzf_paused_mid_pulse = false;
         mzf_timer_start_resume(mzf_paused_remaining_ticks);
         return true;
+    }
+
+    if (mzf_stage == MZF_STAGE_ULTRAFAST)
+    {
+        return mzf_start_ultrafast_output();
     }
 
     return mzf_start_normal_output();
@@ -1091,6 +1204,12 @@ bool mzf_playback_pause(void)
     if (mzf_state != MZF_PLAYBACK_RUNNING)
     {
         return false;
+    }
+
+    if (mzf_stage == MZF_STAGE_ULTRAFAST)
+    {
+        mzf_state = MZF_PLAYBACK_PAUSED;
+        return true;
     }
 
     if (mzf_boundary_waiting)
@@ -1148,6 +1267,7 @@ void mzf_playback_stop(void)
     mzf_record_data_length = 0UL;
     mzf_record_data_file_end = 0UL;
     mzf_record_data_read = 0UL;
+    mzf_ultrafast_reset();
     mz_sense_set(true);
 }
 
@@ -1161,6 +1281,21 @@ void mzf_playback_service(void)
     if (mzf_boundary_waiting)
     {
         mzf_service_boundary_auto_continue();
+        return;
+    }
+
+    if (mzf_stage == MZF_STAGE_ULTRAFAST)
+    {
+        if (!mzf_ultrafast_pump(MZF_ULTRAFAST_PUMP_BYTES))
+        {
+            mzf_set_error(mzf_ultrafast_get_error_text(), MZF_PLAYBACK_IO_ERROR);
+            return;
+        }
+        if (mzf_ultrafast_is_finished())
+        {
+            mzf_state = MZF_PLAYBACK_FINISHED;
+            mz_sense_set(true);
+        }
         return;
     }
 
@@ -1204,6 +1339,82 @@ uint8_t mzf_playback_get_buffer_fill_percent(void)
 uint32_t mzf_playback_get_total_duration_ms(void)
 {
     return mzf_total_duration_ms;
+}
+
+uint8_t mzf_playback_get_progress_percent(void)
+{
+    uint32_t percent;
+    uint32_t total;
+    uint32_t done = 0UL;
+    uint16_t read_sequence;
+    uint8_t header_offset;
+
+    if (!mzf_ultrafast_is_active())
+    {
+        return 0U;
+    }
+
+    if (mzf_stage == MZF_STAGE_ULTRAFAST)
+    {
+        return mzf_ultrafast_get_progress_percent();
+    }
+
+    ATOMIC_BLOCK(ATOMIC_RESTORESTATE)
+    {
+        header_offset = mzf_header_offset;
+        read_sequence = mzf_fifo_read_sequence;
+    }
+
+    total = MZF_HEADER_BYTES + (uint32_t)mzf_ultrafast_get_loader_size();
+    if (total == 0UL)
+    {
+        return 0U;
+    }
+
+    if (mzf_stage == MZF_STAGE_HEADER)
+    {
+        done = header_offset;
+    }
+    else if (mzf_stage == MZF_STAGE_DATA)
+    {
+        done = MZF_HEADER_BYTES + (uint32_t)read_sequence;
+    }
+    else if (mzf_stage != MZF_STAGE_NONE)
+    {
+        done = total;
+    }
+
+    if (done > total) done = total;
+    percent = (done * 100UL) / total;
+    return (percent > 100UL) ? 100U : (uint8_t)percent;
+}
+
+mzf_playback_phase_t mzf_playback_get_progress_phase(void)
+{
+    if (!mzf_ultrafast_is_active())
+    {
+        return MZF_PLAYBACK_PHASE_NORMAL;
+    }
+
+    if (mzf_stage == MZF_STAGE_ULTRAFAST)
+    {
+        return MZF_PLAYBACK_PHASE_ULTRAFAST_DATA;
+    }
+
+    switch (mzf_ultrafast_get_variant())
+    {
+        case MZF_ULTRAFAST_VARIANT_LOW:
+            return MZF_PLAYBACK_PHASE_ULTRAFAST_LOADER_LOW;
+        case MZF_ULTRAFAST_VARIANT_HIGH:
+            return MZF_PLAYBACK_PHASE_ULTRAFAST_LOADER_HIGH;
+        default:
+            return MZF_PLAYBACK_PHASE_NORMAL;
+    }
+}
+
+bool mzf_playback_is_ultrafast_active(void)
+{
+    return mzf_ultrafast_is_active();
 }
 
 /*

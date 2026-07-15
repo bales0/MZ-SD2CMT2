@@ -3,6 +3,7 @@
 #include <Arduino.h>
 #include "../formats/file_format.h"
 #include "../ui/menu.h"
+#include "play_engine.h"
 
 #define PLAY_CONTROLLER_NAME_MAX 64
 #define PLAY_CONTROLLER_PATH_MAX 160
@@ -21,6 +22,7 @@ typedef struct
     const char *full_path;
     file_format_t format;
     bool invert_signal;
+    bool ultrafast_enabled;
     play_control_mode_t control_mode;
     bool waiting_for_motor;
 
@@ -37,6 +39,7 @@ typedef struct
 
     /* LEP/L16 show immediate source-byte progress instead of a scanned duration. */
     bool progress_is_percent;
+    play_progress_phase_t progress_phase;
     uint8_t progress_percent;
 
     /* Prepared sample FIFO fill 0..100 %. */
@@ -47,6 +50,7 @@ void play_controller_init(void);
 void play_controller_start_session(const char *filename,
                                    const char *full_path,
                                    bool invert_signal,
+                                   bool ultrafast_enabled,
                                    play_control_mode_t control_mode);
 void play_controller_toggle_play_pause(void);
 void play_controller_stop(void);
@@ -59,5 +63,6 @@ const char* play_controller_get_filename(void);
 const char* play_controller_get_full_path(void);
 file_format_t play_controller_get_format(void);
 bool play_controller_get_invert_signal(void);
+bool play_controller_get_ultrafast_enabled(void);
 play_control_mode_t play_controller_get_control_mode(void);
 play_controller_state_t play_controller_get_state(void);

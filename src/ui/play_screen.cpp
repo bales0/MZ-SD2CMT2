@@ -18,6 +18,11 @@ static const char text_wait_time[] PROGMEM = "WAIT %02u:%02u/%02u:%02u";
 static const char text_play_time[] PROGMEM = "%s %02u:%02u/%02u:%02u";
 static const char text_wait_percent[] PROGMEM = "WAIT %03u%%";
 static const char text_play_percent[] PROGMEM = "%s %03u%%";
+static const char text_wait_phase_percent[] PROGMEM = "WAIT %s %03u%%";
+static const char text_play_phase_percent[] PROGMEM = "%s %s %03u%%";
+static const char text_phase_nll[] PROGMEM = "NLL";
+static const char text_phase_nlh[] PROGMEM = "NLH";
+static const char text_phase_ul[] PROGMEM = "UL";
 
 static void lcd_print_fixed(uint8_t row, const char *text)
 {
@@ -78,6 +83,17 @@ static char play_pause_indicator(const play_controller_view_t *view)
     return '\0';
 }
 
+static PGM_P progress_phase_label_P(play_progress_phase_t phase)
+{
+    switch (phase)
+    {
+        case PLAY_PROGRESS_PHASE_ULTRAFAST_LOADER_LOW: return text_phase_nll;
+        case PLAY_PROGRESS_PHASE_ULTRAFAST_LOADER_HIGH: return text_phase_nlh;
+        case PLAY_PROGRESS_PHASE_ULTRAFAST_DATA: return text_phase_ul;
+        default: return NULL;
+    }
+}
+
 /* Put an M/U reason in the final LCD column without shortening the normal
    time or percentage display. */
 static void append_pause_indicator(char *line, char indicator)
@@ -107,6 +123,7 @@ void play_screen_render(const play_controller_view_t *view)
 {
     char line1[17];
     char label[4];
+    char phase_label[4];
     char error_fallback[17];
     uint8_t elapsed_minutes;
     uint8_t elapsed_seconds;
@@ -140,16 +157,40 @@ void play_screen_render(const play_controller_view_t *view)
     {
         if (view->progress_is_percent)
         {
+            PGM_P phase_label_P = progress_phase_label_P(view->progress_phase);
+            if (phase_label_P != NULL)
+            {
+                flash_text_copy(phase_label, sizeof(phase_label), phase_label_P);
+            }
+
             if (view->waiting_for_motor)
             {
-                flash_text_snprintf(line1, sizeof(line1), text_wait_percent,
-                                    (unsigned int)view->progress_percent);
+                if (phase_label_P != NULL)
+                {
+                    flash_text_snprintf(line1, sizeof(line1), text_wait_phase_percent,
+                                        phase_label,
+                                        (unsigned int)view->progress_percent);
+                }
+                else
+                {
+                    flash_text_snprintf(line1, sizeof(line1), text_wait_percent,
+                                        (unsigned int)view->progress_percent);
+                }
             }
             else
             {
                 flash_text_copy(label, sizeof(label), state_to_label_P(view->state));
-                flash_text_snprintf(line1, sizeof(line1), text_play_percent, label,
-                                    (unsigned int)view->progress_percent);
+                if (phase_label_P != NULL)
+                {
+                    flash_text_snprintf(line1, sizeof(line1), text_play_phase_percent,
+                                        label, phase_label,
+                                        (unsigned int)view->progress_percent);
+                }
+                else
+                {
+                    flash_text_snprintf(line1, sizeof(line1), text_play_percent, label,
+                                        (unsigned int)view->progress_percent);
+                }
             }
         }
         else

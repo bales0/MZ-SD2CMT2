@@ -17,6 +17,7 @@
 static char prepared_full_path[PLAY_ENGINE_PATH_MAX];
 static file_format_t prepared_format = FILE_FORMAT_UNKNOWN;
 static bool prepared_invert_signal = false;
+static bool prepared_ultrafast_enabled = false;
 static play_engine_state_t engine_state = PLAY_ENGINE_STATE_STOPPED;
 static char engine_error_text[PLAY_ENGINE_ERROR_TEXT_MAX];
 
@@ -189,7 +190,8 @@ static bool play_engine_prepare_mzf(void)
 {
     /* MZF/MZT/M12 use their fixed native polarity; INVERT SIG. applies
        only to sampled WAV and LEP/L16 transports. */
-    if (!mzf_playback_prepare(prepared_full_path, prepared_format))
+    if (!mzf_playback_prepare(prepared_full_path, prepared_format,
+                              prepared_ultrafast_enabled))
     {
         play_engine_set_error(mzf_playback_get_error_text());
         return false;
@@ -239,6 +241,7 @@ void play_engine_init(void)
     prepared_full_path[0] = '\0';
     prepared_format = FILE_FORMAT_UNKNOWN;
     prepared_invert_signal = false;
+    prepared_ultrafast_enabled = false;
     engine_state = PLAY_ENGINE_STATE_STOPPED;
     total_duration_ms = 0UL;
     play_engine_clock_reset();
@@ -265,6 +268,7 @@ bool play_engine_prepare(const play_engine_config_t *config)
     prepared_full_path[sizeof(prepared_full_path) - 1U] = '\0';
     prepared_format = config->format;
     prepared_invert_signal = config->invert_signal;
+    prepared_ultrafast_enabled = config->ultrafast_enabled;
 
     return play_engine_prepare_saved_source();
 }
@@ -474,8 +478,39 @@ uint8_t play_engine_get_progress_percent(void)
     {
         return edge_playback_get_progress_percent();
     }
+    if (file_format_is_sharp_tape(prepared_format))
+    {
+        return mzf_playback_get_progress_percent();
+    }
     return 0U;
 }
+
+play_progress_phase_t play_engine_get_progress_phase(void)
+{
+    if (!file_format_is_sharp_tape(prepared_format))
+    {
+        return PLAY_PROGRESS_PHASE_NORMAL;
+    }
+
+    switch (mzf_playback_get_progress_phase())
+    {
+        case MZF_PLAYBACK_PHASE_ULTRAFAST_LOADER_LOW:
+            return PLAY_PROGRESS_PHASE_ULTRAFAST_LOADER_LOW;
+        case MZF_PLAYBACK_PHASE_ULTRAFAST_LOADER_HIGH:
+            return PLAY_PROGRESS_PHASE_ULTRAFAST_LOADER_HIGH;
+        case MZF_PLAYBACK_PHASE_ULTRAFAST_DATA:
+            return PLAY_PROGRESS_PHASE_ULTRAFAST_DATA;
+        default:
+            return PLAY_PROGRESS_PHASE_NORMAL;
+    }
+}
+
+bool play_engine_is_ultrafast_active(void)
+{
+    return file_format_is_sharp_tape(prepared_format) &&
+           mzf_playback_is_ultrafast_active();
+}
+
 uint8_t play_engine_get_buffer_fill_percent(void)
 {
     uint32_t percent;
