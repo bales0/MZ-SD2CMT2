@@ -2,9 +2,14 @@
 
 Based on work and ideas of hlide and Daniel Coulom to improve UI and features of original MZ-SD2CMT.
 
-!!!WORK IN PROGRESS!!!
+WORKING VERSION!
 
-SD card based CMT Emulator for Sharp MZ-800, supporting playing WAV, LEP, MZF and recording WAV, LEP.
+SD card based CMT Emulator for Sharp MZ-800
+Supporting:
+WAV (44kHz, 22kHz, 8bit), LEP, L16, MZF, M12, MZT - loading
+ULTRA FAST load for compatible MZF, loader select low/high loader position according free space, if not possible, standard load is used
+WAV (44kHz, 22kHz, 8bit), LEP, L16 - recording 
+
 
 ## Parts Used
 1. Arduino Mini MEGA 2560
@@ -81,15 +86,8 @@ Wire up as above, and program the Arduino MEGA using the IDE.
 The following picture is showing how to connect Arduino to 8255:  
 ![mz-700 - 8255 <-> Arduino](https://user-images.githubusercontent.com/56785/47266539-4eb26880-d538-11e8-9fdb-7d2fadc24ca2.png)
 
-Drop some MZF/M12/MZT files onto a FAT32 formatted SD card, plug it into the mz-sd²cmt, and power on.
+Future plan:
+- dedicated one piece PCB instead of modules
+- use of load/record sound monitor
+- bigger LCD/OLED
 
-
-## Old usage
-Drop some LEP or WAV files (converted MZF Files through MZF2LEP tool) onto a FAT32 formatted SD card, plug it into the mz-sd2cmt2, and power on.
-Note that WAV files have a limitation: 8-bit mono channel 22kHz and 44kHz.
-
-## Issues
-
-LEP file is supported. Suffixes .LEP and .L16 are for time resolution 50µs and 16µs (As the original LEP from SDLEP-READER - Daniel Coulon). The only interest is for a program needing to read severals blocks. Maybe the same thing can be handled through a MZT file (with multiple data blocks) by listening to MOTOR signal to separate block readings. But unlike LEP, there is no way to say whether the next block is a header block or a data block.
-
-Some programs are a set of blocks in the tape: the first program will read the rest in one or several blocks. Right now, MZF, M12 and MZT don't handle them correctly (no indication whether the next block is a header or a data so you can emit the right prolog). Maybe defining a new binary file with those indication may help to allow reading multiple data. 

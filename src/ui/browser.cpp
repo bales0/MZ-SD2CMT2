@@ -17,6 +17,7 @@
 #define NAME_SCROLL_START_MS 900U
 #define NAME_SCROLL_STEP_MS 260U
 #define NAME_SCROLL_END_PAUSE_MS 900U
+#define BROWSER_WRAP_REPEAT_PAUSE_MS 650U
 #define BROWSER_ROOT_RETRY_DELAY_MS 80U
 #define BROWSER_ROOT_RETRY_COUNT 3U
 
@@ -44,9 +45,12 @@ static uint32_t name_scroll_next_ms = 0U;
    selected file on the second line changes. */
 static uint8_t path_scroll_offset = 0U;
 static uint32_t path_scroll_next_ms = 0U;
+static int8_t wrap_pause_direction = 0;
+static uint32_t wrap_pause_until_ms = 0U;
 
 static void browser_reset_name_scroll(void);
 static void browser_reset_path_scroll(void);
+static void browser_reset_wrap_pause(void);
 static void browser_update_selected_full_path(void);
 
 static void lcd_print_line(uint8_t row, const char *text)
@@ -123,6 +127,32 @@ static void browser_reset_path_scroll(void)
 {
     path_scroll_offset = 0U;
     path_scroll_next_ms = millis() + NAME_SCROLL_START_MS;
+}
+
+static void browser_reset_wrap_pause(void)
+{
+    wrap_pause_direction = 0;
+    wrap_pause_until_ms = 0U;
+}
+
+static bool browser_wrap_pause_elapsed(int8_t direction)
+{
+    uint32_t now = millis();
+
+    if (wrap_pause_direction != direction)
+    {
+        wrap_pause_direction = direction;
+        wrap_pause_until_ms = now + BROWSER_WRAP_REPEAT_PAUSE_MS;
+        return false;
+    }
+
+    if ((int32_t)(now - wrap_pause_until_ms) < 0)
+    {
+        return false;
+    }
+
+    browser_reset_wrap_pause();
+    return true;
 }
 
 static void browser_update_selected_full_path(void)
@@ -224,6 +254,7 @@ static browser_directory_load_result_t browser_scan_current_directory(void)
 
     current_entry = first_entry;
     browser_reset_name_scroll();
+    browser_reset_wrap_pause();
     browser_update_selected_full_path();
     return BROWSER_DIRECTORY_LOADED;
 }
@@ -254,6 +285,7 @@ static bool browser_load_last_entry(void)
     }
     selected_index = (uint16_t)(dir_count - 1U);
     browser_reset_name_scroll();
+    browser_reset_wrap_pause();
     browser_update_selected_full_path();
     return true;
 }
@@ -279,6 +311,7 @@ static void browser_reset_root_state(void)
     parent_stack_depth = 0U;
     browser_reset_name_scroll();
     browser_reset_path_scroll();
+    browser_reset_wrap_pause();
 }
 
 /*
@@ -503,21 +536,28 @@ static bool browser_load_sorted_neighbor(bool previous)
         selected_index++;
     }
     browser_reset_name_scroll();
+    browser_reset_wrap_pause();
     browser_update_selected_full_path();
     return true;
 }
 
-static void browser_move_up(void)
+static void browser_move_up(bool repeated)
 {
     if (!sd_ok || (dir_count == 0U))
     {
+        browser_reset_wrap_pause();
         return;
     }
     if (selected_index == 0U)
     {
+        if (repeated && (dir_count > 1U) && !browser_wrap_pause_elapsed(-1))
+        {
+            return;
+        }
         browser_load_last_entry();
         return;
     }
+    browser_reset_wrap_pause();
     if (!browser_load_sorted_neighbor(true))
     {
         /* A no-neighbour result is a normal end-of-sort condition. Wrap
@@ -533,17 +573,23 @@ static void browser_move_up(void)
     }
 }
 
-static void browser_move_down(void)
+static void browser_move_down(bool repeated)
 {
     if (!sd_ok || (dir_count == 0U))
     {
+        browser_reset_wrap_pause();
         return;
     }
     if ((uint16_t)(selected_index + 1U) >= dir_count)
     {
+        if (repeated && (dir_count > 1U) && !browser_wrap_pause_elapsed(1))
+        {
+            return;
+        }
         browser_load_first_entry();
         return;
     }
+    browser_reset_wrap_pause();
     if (!browser_load_sorted_neighbor(false))
     {
         /* See browser_move_up(): keep a stale count or a tie at the end of
@@ -625,12 +671,16 @@ browser_action_t browser_handle_event(button_event_t event)
     switch (event)
     {
         case BUTTON_EVENT_UP_PRESS:
+            browser_move_up(false);
+            return BROWSER_ACTION_NONE;
         case BUTTON_EVENT_UP_REPEAT:
-            browser_move_up();
+            browser_move_up(true);
             return BROWSER_ACTION_NONE;
         case BUTTON_EVENT_DOWN_PRESS:
+            browser_move_down(false);
+            return BROWSER_ACTION_NONE;
         case BUTTON_EVENT_DOWN_REPEAT:
-            browser_move_down();
+            browser_move_down(true);
             return BROWSER_ACTION_NONE;
         case BUTTON_EVENT_LEFT_SHORT:
             browser_go_parent();

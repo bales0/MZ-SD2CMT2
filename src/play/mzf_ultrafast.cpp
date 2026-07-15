@@ -16,6 +16,11 @@
 #define MZF_HEADER_EXEC_ADDRESS_OFFSET 0x16U
 #define MZF_ULTRAFAST_TIMEOUT_US 500000UL
 
+static bool is_supported_file_type(uint8_t type)
+{
+    return (type == 0x01U) || (type == 0x76U);
+}
+
 /*
    Z80 receiver body. The generated prefix loads:
      BC = payload length, HL = payload destination, DE = exec address,
@@ -216,7 +221,7 @@ bool mzf_ultrafast_prepare(file_format_t format,
         return false;
     }
 
-    if (header[MZF_HEADER_FILE_TYPE_OFFSET] != 1U)
+    if (!is_supported_file_type(header[MZF_HEADER_FILE_TYPE_OFFSET]))
     {
         return false;
     }
@@ -272,7 +277,6 @@ void mzf_ultrafast_patch_loader_header(uint8_t *header)
         return;
     }
 
-    header[MZF_HEADER_FILE_TYPE_OFFSET] = 1U;
     write_le16(header + MZF_HEADER_DATA_LENGTH_OFFSET, context.loader_size);
     write_le16(header + MZF_HEADER_LOAD_ADDRESS_OFFSET, context.loader_address);
     write_le16(header + MZF_HEADER_EXEC_ADDRESS_OFFSET, context.loader_address);
