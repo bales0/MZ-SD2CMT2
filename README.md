@@ -2,12 +2,19 @@
 
 Based on work and ideas of hlide and Daniel Coulom to improve UI and features of original MZ-SD2CMT.
 
+
 WORKING VERSION!
 
+
 SD card based CMT Emulator for Sharp MZ-800
+
+
 Supporting:
+
 WAV (44kHz, 22kHz, 8bit), LEP, L16, MZF, M12, MZT - loading
+
 ULTRA FAST load for compatible MZF, loader select low/high loader position according free space, if not possible, standard load is used
+
 WAV (44kHz, 22kHz, 8bit), LEP, L16 - recording 
 
 
