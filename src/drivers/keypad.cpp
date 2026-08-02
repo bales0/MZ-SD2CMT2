@@ -23,11 +23,11 @@ static keypad_calibration_t keypad_calibration =
 static button_t last_raw_button = BUTTON_NONE;
 static button_t stable_button = BUTTON_NONE;
 
-static uint32_t last_raw_change_ms = 0;
+static uint16_t last_raw_change_ms = 0U;
 
 static button_t active_button = BUTTON_NONE;
-static uint32_t press_start_ms = 0;
-static uint32_t last_repeat_ms = 0;
+static uint16_t press_start_ms = 0U;
+static uint16_t last_repeat_ms = 0U;
 
 static bool long_event_sent = false;
 static bool repeat_started = false;
@@ -170,7 +170,7 @@ static button_event_t keypad_long_event(button_t button)
     }
 }
 
-static void keypad_start_press(button_t button, uint32_t now)
+static void keypad_start_press(button_t button, uint16_t now)
 {
     active_button = button;
     press_start_ms = now;
@@ -183,8 +183,8 @@ static void keypad_start_press(button_t button, uint32_t now)
 static void keypad_clear_press(void)
 {
     active_button = BUTTON_NONE;
-    press_start_ms = 0;
-    last_repeat_ms = 0;
+    press_start_ms = 0U;
+    last_repeat_ms = 0U;
 
     long_event_sent = false;
     repeat_started = false;
@@ -197,7 +197,7 @@ void keypad_init(void)
     last_raw_button = BUTTON_NONE;
     stable_button = BUTTON_NONE;
 
-    last_raw_change_ms = millis();
+    last_raw_change_ms = (uint16_t)millis();
 
     keypad_clear_press();
 }
@@ -216,7 +216,7 @@ button_t keypad_get_button(void)
 
 button_event_t keypad_get_event(void)
 {
-    uint32_t now = millis();
+    uint16_t now = (uint16_t)millis();
 
     button_t raw_button = keypad_get_button();
 
@@ -281,7 +281,7 @@ button_event_t keypad_get_event(void)
     if (active_button != BUTTON_NONE &&
         stable_button == active_button)
     {
-        uint32_t held_ms = now - press_start_ms;
+        uint16_t held_ms = (uint16_t)(now - press_start_ms);
 
         if (keypad_button_uses_press_repeat(active_button))
         {

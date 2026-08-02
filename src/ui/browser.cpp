@@ -31,18 +31,18 @@ static char saved_path[BROWSER_PATH_MAX] = { '/', '\0' };
 static char saved_name[BROWSER_NAME_MAX];
 static bool saved_is_dir = false;
 static char status_message[17];
-static uint32_t status_message_until_ms = 0;
+static uint16_t status_message_until_ms = 0U;
 static bool right_locked_until_release = false;
 
 /* Horizontal positions on the 16-character LCD. */
 static uint8_t name_scroll_offset = 0U;
-static uint32_t name_scroll_next_ms = 0U;
+static uint16_t name_scroll_next_ms = 0U;
 /* The active directory gets its own scroll state; it must not jump when the
    selected file on the second line changes. */
 static uint8_t path_scroll_offset = 0U;
-static uint32_t path_scroll_next_ms = 0U;
+static uint16_t path_scroll_next_ms = 0U;
 static int8_t wrap_pause_direction = 0;
-static uint32_t wrap_pause_until_ms = 0U;
+static uint16_t wrap_pause_until_ms = 0U;
 
 static void browser_reset_name_scroll(void);
 static void browser_reset_path_scroll(void);
@@ -95,7 +95,7 @@ static void set_status_message_P(PGM_P message)
         }
     }
     status_message[16] = '\0';
-    status_message_until_ms = millis() + MESSAGE_HOLD_MS;
+    status_message_until_ms = (uint16_t)((uint16_t)millis() + MESSAGE_HOLD_MS);
 }
 
 static void browser_set_current_entry_message_P(PGM_P message)
@@ -116,13 +116,13 @@ static bool browser_is_root(void)
 static void browser_reset_name_scroll(void)
 {
     name_scroll_offset = 0U;
-    name_scroll_next_ms = millis() + NAME_SCROLL_START_MS;
+    name_scroll_next_ms = (uint16_t)((uint16_t)millis() + NAME_SCROLL_START_MS);
 }
 
 static void browser_reset_path_scroll(void)
 {
     path_scroll_offset = 0U;
-    path_scroll_next_ms = millis() + NAME_SCROLL_START_MS;
+    path_scroll_next_ms = (uint16_t)((uint16_t)millis() + NAME_SCROLL_START_MS);
 }
 
 static void browser_reset_wrap_pause(void)
@@ -133,16 +133,16 @@ static void browser_reset_wrap_pause(void)
 
 static bool browser_wrap_pause_elapsed(int8_t direction)
 {
-    uint32_t now = millis();
+    uint16_t now = (uint16_t)millis();
 
     if (wrap_pause_direction != direction)
     {
         wrap_pause_direction = direction;
-        wrap_pause_until_ms = now + BROWSER_WRAP_REPEAT_PAUSE_MS;
+        wrap_pause_until_ms = (uint16_t)(now + BROWSER_WRAP_REPEAT_PAUSE_MS);
         return false;
     }
 
-    if ((int32_t)(now - wrap_pause_until_ms) < 0)
+    if ((int16_t)(now - wrap_pause_until_ms) < 0)
     {
         return false;
     }
@@ -749,9 +749,9 @@ static uint8_t browser_path_name_columns(void)
 }
 
 static void browser_advance_scroll(const char *text, uint8_t visible_columns,
-                                   uint8_t *offset, uint32_t *next_ms)
+                                   uint8_t *offset, uint16_t *next_ms)
 {
-    uint32_t now;
+    uint16_t now;
     size_t length;
     uint8_t maximum_offset;
 
@@ -768,8 +768,8 @@ static void browser_advance_scroll(const char *text, uint8_t visible_columns,
         return;
     }
 
-    now = millis();
-    if ((int32_t)(now - *next_ms) < 0)
+    now = (uint16_t)millis();
+    if ((int16_t)(now - *next_ms) < 0)
     {
         return;
     }
@@ -780,17 +780,17 @@ static void browser_advance_scroll(const char *text, uint8_t visible_columns,
         (*offset)++;
         if (*offset >= maximum_offset)
         {
-            *next_ms = now + NAME_SCROLL_END_PAUSE_MS;
+            *next_ms = (uint16_t)(now + NAME_SCROLL_END_PAUSE_MS);
         }
         else
         {
-            *next_ms = now + NAME_SCROLL_STEP_MS;
+            *next_ms = (uint16_t)(now + NAME_SCROLL_STEP_MS);
         }
     }
     else
     {
         *offset = 0U;
-        *next_ms = now + NAME_SCROLL_START_MS;
+        *next_ms = (uint16_t)(now + NAME_SCROLL_START_MS);
     }
 }
 
@@ -949,9 +949,10 @@ void browser_render(void)
 {
     char line0[17];
     char line1[17];
-    uint32_t now = millis();
+    uint16_t now = (uint16_t)millis();
 
-    if (now < status_message_until_ms)
+    if ((status_message[0] != '\0') &&
+        ((int16_t)(now - status_message_until_ms) < 0))
     {
         lcd_set_cursor(0, 0);
         lcd_print(status_message);
@@ -967,6 +968,8 @@ void browser_render(void)
         }
         return;
     }
+
+    status_message[0] = '\0';
 
     if (!sd_ok)
     {

@@ -31,8 +31,8 @@ typedef enum
     APP_SCREEN_RECORD_MENU
 } app_screen_t;
 
-static uint32_t last_lcd_update_ms = 0U;
-static uint32_t last_active_keypad_poll_ms = 0U;
+static uint16_t last_lcd_update_ms = 0U;
+static uint16_t last_active_keypad_poll_ms = 0U;
 static bool sd_ok = false;
 static app_screen_t current_screen = APP_SCREEN_BROWSER;
 
@@ -283,7 +283,7 @@ void setup()
 
 void loop()
 {
-    uint32_t now = millis();
+    uint16_t now = (uint16_t)millis();
 
     if (current_screen == APP_SCREEN_PLAY)
     {

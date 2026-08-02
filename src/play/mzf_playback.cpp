@@ -43,14 +43,14 @@
 #define MZF_LONG_HIGH_TICKS  MZF_US_TO_TICKS(500U)
 #define MZF_LONG_LOW_TICKS   MZF_US_TO_TICKS(500U)
 
-#define MZF_MZ800_LONG_GAP_SHORT_PULSES 6400UL
-#define MZF_MZ800_SHORT_GAP_SHORT_PULSES 6400UL
-#define MZF_MZ800_LONG_MARK_LONG_PULSES 40UL
-#define MZF_MZ800_LONG_MARK_SHORT_PULSES 40UL
-#define MZF_MZ800_SHORT_MARK_LONG_PULSES 20UL
-#define MZF_MZ800_SHORT_MARK_SHORT_PULSES 20UL
-#define MZF_MZ800_TAPE_MARK_FINAL_LONG_PULSES 2UL
-#define MZF_MZ800_TRAILING_LONG_PULSES 2UL
+#define MZF_MZ800_LONG_GAP_SHORT_PULSES 6400U
+#define MZF_MZ800_SHORT_GAP_SHORT_PULSES 6400U
+#define MZF_MZ800_LONG_MARK_LONG_PULSES 40U
+#define MZF_MZ800_LONG_MARK_SHORT_PULSES 40U
+#define MZF_MZ800_SHORT_MARK_LONG_PULSES 20U
+#define MZF_MZ800_SHORT_MARK_SHORT_PULSES 20U
+#define MZF_MZ800_TAPE_MARK_FINAL_LONG_PULSES 2U
+#define MZF_MZ800_TRAILING_LONG_PULSES 2U
 
 #define MZF_FIFO_BYTES WAV_SAMPLE_STREAM_BUFFER_BYTES
 #define MZF_FIFO_CAPACITY (MZF_FIFO_BYTES - 1U)
@@ -61,7 +61,7 @@
     transports, and PLAY CTRL / MANUAL, leave MOTOR high; do not strand a
     binary image after its 128-byte header in that case.
 */
-#define MZF_BOUNDARY_AUTO_CONTINUE_MS 120UL
+#define MZF_BOUNDARY_AUTO_CONTINUE_MS 120U
 
 #if ((MZF_FIFO_BYTES & (MZF_FIFO_BYTES - 1U)) != 0U)
 #error "MZF FIFO needs a power-of-two size"
@@ -116,7 +116,7 @@ static uint32_t mzf_total_duration_ms = 0UL;
 
 static mzf_stage_t mzf_stage = MZF_STAGE_NONE;
 static mzf_normal_step_t mzf_normal_step = MZF_STEP_BEGIN;
-static uint32_t mzf_normal_loop = 0UL;
+static uint16_t mzf_normal_loop = 0U;
 static uint32_t mzf_normal_bytes_remaining = 0UL;
 static uint16_t mzf_normal_checksum = 0U;
 static uint8_t mzf_normal_data = 0U;
@@ -134,7 +134,7 @@ static uint16_t mzf_paused_remaining_ticks = 0U;
 
 /* Foreground-only fallback timer for a missing/short MOTOR boundary. */
 static bool mzf_boundary_auto_timer_armed = false;
-static uint32_t mzf_boundary_auto_start_ms = 0UL;
+static uint16_t mzf_boundary_auto_start_ms = 0U;
 
 static void mzf_set_error_P(PGM_P text, mzf_playback_state_t state)
 {
@@ -626,7 +626,7 @@ static void mzf_begin_normal_stage(mzf_stage_t stage)
 {
     mzf_stage = stage;
     mzf_normal_step = MZF_STEP_BEGIN;
-    mzf_normal_loop = 0UL;
+    mzf_normal_loop = 0U;
     mzf_normal_bytes_remaining = 0UL;
     mzf_normal_checksum = 0U;
     mzf_normal_data = 0U;
@@ -636,7 +636,7 @@ static void mzf_begin_normal_stage(mzf_stage_t stage)
     mzf_boundary_waiting = false;
     mzf_motor_low_seen = 0U;
     mzf_boundary_auto_timer_armed = false;
-    mzf_boundary_auto_start_ms = 0UL;
+    mzf_boundary_auto_start_ms = 0U;
     mzf_paused_mid_pulse = false;
     mzf_timer_phase_high = false;
     mzf_current_pulse_is_long = false;
@@ -705,7 +705,7 @@ static bool mzf_next_normal_pulse_from_isr(uint16_t *high_ticks,
                 continue;
 
             case MZF_STEP_GAP:
-                if (mzf_normal_loop == 0UL)
+                if (mzf_normal_loop == 0U)
                 {
                     mzf_normal_loop = mzf_normal_header_preamble ?
                         MZF_MZ800_LONG_MARK_LONG_PULSES :
@@ -719,7 +719,7 @@ static bool mzf_next_normal_pulse_from_isr(uint16_t *high_ticks,
                 return true;
 
             case MZF_STEP_TAPE_MARK_LONG:
-                if (mzf_normal_loop == 0UL)
+                if (mzf_normal_loop == 0U)
                 {
                     mzf_normal_loop = mzf_normal_header_preamble ?
                         MZF_MZ800_LONG_MARK_SHORT_PULSES :
@@ -733,7 +733,7 @@ static bool mzf_next_normal_pulse_from_isr(uint16_t *high_ticks,
                 return true;
 
             case MZF_STEP_TAPE_MARK_SHORT:
-                if (mzf_normal_loop == 0UL)
+                if (mzf_normal_loop == 0U)
                 {
                     mzf_normal_loop = MZF_MZ800_TAPE_MARK_FINAL_LONG_PULSES;
                     mzf_normal_step = MZF_STEP_TAPE_MARK_FINAL;
@@ -745,7 +745,7 @@ static bool mzf_next_normal_pulse_from_isr(uint16_t *high_ticks,
                 return true;
 
             case MZF_STEP_TAPE_MARK_FINAL:
-                if (mzf_normal_loop == 0UL)
+                if (mzf_normal_loop == 0U)
                 {
                     byte_count = mzf_stage_byte_count();
                     mzf_normal_bytes_remaining = byte_count;
@@ -846,7 +846,7 @@ static bool mzf_next_normal_pulse_from_isr(uint16_t *high_ticks,
                 return true;
 
             case MZF_STEP_TRAILING_LONGS:
-                if (mzf_normal_loop == 0UL)
+                if (mzf_normal_loop == 0U)
                 {
                     mzf_normal_step = MZF_STEP_BOUNDARY;
                     continue;
@@ -979,7 +979,7 @@ static bool mzf_advance_after_boundary(void)
         mzf_boundary_waiting = false;
         mzf_motor_low_seen = 0U;
         mzf_boundary_auto_timer_armed = false;
-        mzf_boundary_auto_start_ms = 0UL;
+        mzf_boundary_auto_start_ms = 0U;
         return true;
     }
 
@@ -1021,7 +1021,7 @@ static bool mzf_advance_after_boundary(void)
 static void mzf_service_boundary_auto_continue(void)
 {
     bool ultrafast_boundary;
-    uint32_t now;
+    uint16_t now;
 
     if (!mzf_boundary_waiting || (mzf_state != MZF_PLAYBACK_RUNNING))
     {
@@ -1039,7 +1039,7 @@ static void mzf_service_boundary_auto_continue(void)
 
     if (!ultrafast_boundary)
     {
-        now = millis();
+        now = (uint16_t)millis();
         if (!mzf_boundary_auto_timer_armed)
         {
             mzf_boundary_auto_start_ms = now;
@@ -1053,7 +1053,7 @@ static void mzf_service_boundary_auto_continue(void)
             }
         }
         else if ((mzf_motor_low_seen == 0U) &&
-                 ((uint32_t)(now - mzf_boundary_auto_start_ms) <
+                 ((uint16_t)(now - mzf_boundary_auto_start_ms) <
                   MZF_BOUNDARY_AUTO_CONTINUE_MS))
         {
             return;
@@ -1100,7 +1100,7 @@ void mzf_playback_init(void)
     mzf_boundary_waiting = false;
     mzf_motor_low_seen = 0U;
     mzf_boundary_auto_timer_armed = false;
-    mzf_boundary_auto_start_ms = 0UL;
+    mzf_boundary_auto_start_ms = 0U;
     mzf_timer_phase_high = false;
     mzf_current_pulse_is_long = false;
     mzf_paused_mid_pulse = false;
@@ -1257,7 +1257,7 @@ void mzf_playback_stop(void)
     mzf_boundary_waiting = false;
     mzf_motor_low_seen = 0U;
     mzf_boundary_auto_timer_armed = false;
-    mzf_boundary_auto_start_ms = 0UL;
+    mzf_boundary_auto_start_ms = 0U;
     mzf_timer_phase_high = false;
     mzf_current_pulse_is_long = false;
     mzf_paused_mid_pulse = false;
