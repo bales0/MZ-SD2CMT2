@@ -11,14 +11,12 @@ static const char text_ply[] PROGMEM = "PLY";
 static const char text_pau[] PROGMEM = "PAU";
 static const char text_err[] PROGMEM = "ERR";
 static const char text_rdy[] PROGMEM = "RDY";
+static const char text_paused_full[] PROGMEM = "PAUSED";
 static const char text_error[] PROGMEM = "ERR %.12s";
 static const char text_unknown[] PROGMEM = "UNKNOWN";
 static const char text_unsupported[] PROGMEM = "UNSUPPORTED";
-static const char text_wait_time[] PROGMEM = "WAIT %02u:%02u/%02u:%02u";
 static const char text_play_time[] PROGMEM = "%s %02u:%02u/%02u:%02u";
-static const char text_wait_percent[] PROGMEM = "WAIT %03u%%";
 static const char text_play_percent[] PROGMEM = "%s %03u%%";
-static const char text_wait_phase_percent[] PROGMEM = "WAIT %s %03u%%";
 static const char text_play_phase_percent[] PROGMEM = "%s %s %03u%%";
 static const char text_phase_nll[] PROGMEM = "NLL";
 static const char text_phase_nlh[] PROGMEM = "NLH";
@@ -165,17 +163,7 @@ void play_screen_render(const play_controller_view_t *view)
 
             if (view->waiting_for_motor)
             {
-                if (phase_label_P != NULL)
-                {
-                    flash_text_snprintf(line1, sizeof(line1), text_wait_phase_percent,
-                                        phase_label,
-                                        (unsigned int)view->progress_percent);
-                }
-                else
-                {
-                    flash_text_snprintf(line1, sizeof(line1), text_wait_percent,
-                                        (unsigned int)view->progress_percent);
-                }
+                flash_text_copy(line1, sizeof(line1), text_paused_full);
             }
             else
             {
@@ -200,11 +188,7 @@ void play_screen_render(const play_controller_view_t *view)
 
             if (view->waiting_for_motor)
             {
-                flash_text_snprintf(line1, sizeof(line1), text_wait_time,
-                                    (unsigned int)elapsed_minutes,
-                                    (unsigned int)elapsed_seconds,
-                                    (unsigned int)total_minutes,
-                                    (unsigned int)total_seconds);
+                flash_text_copy(line1, sizeof(line1), text_paused_full);
             }
             else
             {
@@ -218,7 +202,7 @@ void play_screen_render(const play_controller_view_t *view)
         }
     }
 
-    pause_indicator = play_pause_indicator(view);
+    pause_indicator = view->waiting_for_motor ? 'M' : play_pause_indicator(view);
     append_pause_indicator(line1, pause_indicator);
     lcd_print_fixed(1U, line1);
 }

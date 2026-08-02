@@ -10,7 +10,7 @@ static const char text_rec_fallback[] PROGMEM = "REC";
 static const char text_wav_rate_22k[] PROGMEM = "22k";
 static const char text_wav_rate_44k[] PROGMEM = "44k";
 static const char text_wait_signal[] PROGMEM = "WAIT SIGNAL B%03u";
-static const char text_wait_motor[] PROGMEM = "WAIT MOTOR B%03u";
+static const char text_paused_waiting_motor[] PROGMEM = "PAUSED         M";
 static const char text_recording[] PROGMEM = "REC %02lu:%02lu B%03u";
 /* Exactly 16 columns: PAU mm:ss Bxxx <M|U>. */
 static const char text_paused[] PROGMEM = "PAU %02lu:%02lu B%03u %c";
@@ -147,10 +147,15 @@ void record_screen_render(void)
     switch (state)
     {
         case RECORD_ENGINE_ARMED:
-            flash_text_snprintf(line1, sizeof(line1),
-                                (record_engine_get_control_mode() == RECORD_CONTROL_AUTO) ?
-                                text_wait_signal : text_wait_motor,
-                                (unsigned int)record_engine_get_buffer_fill_percent());
+            if (record_engine_get_control_mode() == RECORD_CONTROL_AUTO)
+            {
+                flash_text_snprintf(line1, sizeof(line1), text_wait_signal,
+                                    (unsigned int)record_engine_get_buffer_fill_percent());
+            }
+            else
+            {
+                flash_text_copy(line1, sizeof(line1), text_paused_waiting_motor);
+            }
             break;
         case RECORD_ENGINE_RECORDING:
             flash_text_snprintf(line1, sizeof(line1), text_recording,

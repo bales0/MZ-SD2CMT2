@@ -139,7 +139,6 @@ static bool run_keypad_calibration(keypad_calibration_t *calibration)
 
 static void app_enter_browser(void)
 {
-    browser_end_record_scratch();
     browser_restore_saved_position();
     current_screen = APP_SCREEN_BROWSER;
     lcd_clear();
@@ -160,7 +159,6 @@ static void app_enter_record(void)
 {
     record_engine_config_t config;
     browser_save_position();
-    browser_begin_record_scratch();
     config.format = record_menu_get_format();
     config.wav_sample_rate = record_menu_get_wav_sample_rate();
     config.control_mode = record_menu_get_control_mode();

@@ -238,7 +238,7 @@ bool mzf_ultrafast_prepare(file_format_t format,
 
     data_end = (uint32_t)context.data_load_address + context.data_length;
     if ((data_end > 0x10000UL) ||
-        ((data_offset + (uint32_t)context.data_length) != file_size))
+        ((data_offset + (uint32_t)context.data_length) > file_size))
     {
         return false;
     }

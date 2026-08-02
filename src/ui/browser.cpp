@@ -5,13 +5,11 @@
 #include "../drivers/lcd.h"
 #include "../drivers/flash_text.h"
 #include "../drivers/sdcard.h"
-#include "../streams/cmt_mode_scratch.h"
 
 #define MAX_DIR_ENTRIES 999
 #define BROWSER_PATH_MAX 96
 #define BROWSER_NAME_MAX 32
 #define BROWSER_FULL_PATH_MAX 160
-#define BROWSER_PARENT_STACK_MAX 16
 #define MESSAGE_HOLD_MS 1200
 #define LCD_COLUMNS 16U
 #define NAME_SCROLL_START_MS 900U
@@ -32,8 +30,6 @@ static bool saved_position_valid = false;
 static char saved_path[BROWSER_PATH_MAX] = { '/', '\0' };
 static char saved_name[BROWSER_NAME_MAX];
 static bool saved_is_dir = false;
-static uint8_t parent_stack_depth = 0;
-static bool parent_stack_is_dir[BROWSER_PARENT_STACK_MAX];
 static char status_message[17];
 static uint32_t status_message_until_ms = 0;
 static bool right_locked_until_release = false;
@@ -308,7 +304,6 @@ static void browser_reset_root_state(void)
     saved_path[1] = '\0';
     saved_name[0] = '\0';
     saved_is_dir = false;
-    parent_stack_depth = 0U;
     browser_reset_name_scroll();
     browser_reset_path_scroll();
     browser_reset_wrap_pause();
@@ -406,28 +401,6 @@ static bool browser_find_saved_position(void)
     return browser_restore_entry_by_identity(saved_name, saved_is_dir);
 }
 
-static void browser_push_parent_position(void)
-{
-    if (parent_stack_depth >= BROWSER_PARENT_STACK_MAX)
-    {
-        return;
-    }
-    strncpy(cmt_mode_scratch.browser_parent_names[parent_stack_depth], current_entry.name, sizeof(cmt_mode_scratch.browser_parent_names[parent_stack_depth]) - 1);
-    cmt_mode_scratch.browser_parent_names[parent_stack_depth][sizeof(cmt_mode_scratch.browser_parent_names[parent_stack_depth]) - 1] = '\0';
-    parent_stack_is_dir[parent_stack_depth] = current_entry.is_dir;
-    parent_stack_depth++;
-}
-
-static bool browser_pop_parent_position_and_restore(void)
-{
-    if (parent_stack_depth == 0U)
-    {
-        return false;
-    }
-    parent_stack_depth--;
-    return browser_restore_entry_by_identity(cmt_mode_scratch.browser_parent_names[parent_stack_depth], parent_stack_is_dir[parent_stack_depth]);
-}
-
 static void browser_refresh_sd(void)
 {
     show_message_P(PSTR("SD INIT"), PSTR("PLEASE WAIT"), 300U);
@@ -448,6 +421,7 @@ static void browser_go_root(void)
 
 static void browser_go_parent(void)
 {
+    char leaving_name[BROWSER_NAME_MAX];
     if (browser_is_root())
     {
         return;
@@ -458,6 +432,10 @@ static void browser_go_parent(void)
         browser_go_root();
         return;
     }
+
+    strncpy(leaving_name, last_slash + 1, sizeof(leaving_name) - 1U);
+    leaving_name[sizeof(leaving_name) - 1U] = '\0';
+
     if (last_slash == current_path)
     {
         current_path[1] = '\0';
@@ -470,7 +448,10 @@ static void browser_go_parent(void)
     saved_position_valid = false;
     browser_reset_path_scroll();
     browser_build_dir_index();
-    browser_pop_parent_position_and_restore();
+    if (leaving_name[0] != '\0')
+    {
+        (void)browser_restore_entry_by_identity(leaving_name, true);
+    }
 }
 
 static bool browser_enter_directory(const char *name)
@@ -507,7 +488,6 @@ static bool browser_enter_directory(const char *name)
         memcpy(&new_path[path_length + 1U], name, name_length + 1U);
     }
 
-    browser_push_parent_position();
     strncpy(current_path, new_path, sizeof(current_path) - 1U);
     current_path[sizeof(current_path) - 1U] = '\0';
     selected_index = 0U;
@@ -1034,18 +1014,6 @@ void browser_restore_saved_position(void)
     {
         browser_load_first_entry();
     }
-}
-
-void browser_begin_record_scratch(void)
-{
-    /* The record engine reuses the 512B parent-name area as a second stage. */
-    parent_stack_depth = 0U;
-}
-
-void browser_end_record_scratch(void)
-{
-    /* History bytes were reused by record mode; navigation itself remains valid. */
-    parent_stack_depth = 0U;
 }
 
 const char* browser_get_current_path(void)
