@@ -196,7 +196,8 @@ static void browser_set_entry_read_error(void)
     if (!sd_ok)
     {
         dir_count = 0U;
-        browser_set_current_entry_message_P(PSTR("SD CARD ERROR"));
+        browser_set_current_entry_message_P(sdcard_detect_removed_edge() ?
+                                            PSTR("INSERT CARD") : PSTR("SD CARD ERROR"));
         return;
     }
 
@@ -802,6 +803,21 @@ void browser_service(void)
         right_locked_until_release = false;
     }
 
+    (void)sdcard_detect_poll();
+    if (sdcard_detect_removed_edge())
+    {
+        sd_ok = false;
+        dir_count = 0U;
+        if (strcmp_P(current_entry.name, PSTR("INSERT CARD")) != 0)
+        {
+            browser_set_current_entry_message_P(PSTR("INSERT CARD"));
+        }
+    }
+    else if (sdcard_detect_consume_inserted_edge())
+    {
+        browser_refresh_sd();
+    }
+
     browser_advance_scroll(current_entry.name, LCD_COLUMNS, &name_scroll_offset,
                            &name_scroll_next_ms);
 
@@ -954,8 +970,17 @@ void browser_render(void)
 
     if (!sd_ok)
     {
-        flash_text_copy(line0, sizeof(line0), PSTR("SD CARD ERROR"));
-        flash_text_copy(line1, sizeof(line1), PSTR("RIGHT=RETRY"));
+        if (sdcard_detect_removed_edge())
+        {
+            flash_text_copy(line0, sizeof(line0), PSTR("INSERT CARD"));
+            memset(line1, ' ', LCD_COLUMNS);
+            line1[LCD_COLUMNS] = '\0';
+        }
+        else
+        {
+            flash_text_copy(line0, sizeof(line0), PSTR("SD CARD ERROR"));
+            flash_text_copy(line1, sizeof(line1), PSTR("RIGHT=RETRY"));
+        }
     }
     else if (dir_count == 0U)
     {

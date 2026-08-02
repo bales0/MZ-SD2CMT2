@@ -20,6 +20,9 @@ void sdcard_early_prepare_pins(void);
 
 bool sdcard_init(void);
 bool sdcard_is_inserted(void);
+bool sdcard_detect_poll(void);
+bool sdcard_detect_consume_inserted_edge(void);
+bool sdcard_detect_removed_edge(void);
 
 /* Force a full SdFat/SPI initialization even if the card was mounted before.
    Used after card insertion/retry before the browser reopens root. */

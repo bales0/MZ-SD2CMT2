@@ -18,6 +18,12 @@
 #define SD_CHIP_SELECT_PIN 53
 #define SD_CARD_DETECT_PIN 3
 #define SD_CARD_DETECT_ACTIVE_LOW 1
+#define SD_CARD_DETECT_DEBOUNCE_MS 50U
+#define SD_CARD_DETECT_FLAG_KNOWN (1U << 0)
+#define SD_CARD_DETECT_FLAG_LAST_INSERTED (1U << 1)
+#define SD_CARD_DETECT_FLAG_CANDIDATE_INSERTED (1U << 2)
+#define SD_CARD_DETECT_FLAG_INSERTED_PENDING (1U << 3)
+#define SD_CARD_DETECT_FLAG_REMOVED_PENDING (1U << 4)
 
 /*
     CMT/LCD hardware in this project does not share the Mega SPI bus. Dedicated
@@ -38,11 +44,60 @@ static FsFile sdcard_stream_file;
 
 static bool sdcard_mounted = false;
 static char sdcard_error[17];
+static uint8_t sdcard_detect_flags = 0U;
+static uint16_t sdcard_detect_candidate_since_ms = 0U;
 
 static void sdcard_set_error_P(PGM_P text)
 {
     flash_text_copy(sdcard_error, sizeof(sdcard_error), text);
 }
+
+static bool sdcard_read_detect_pin(void)
+{
+#if SD_CARD_DETECT_ACTIVE_LOW
+    return digitalRead(SD_CARD_DETECT_PIN) == LOW;
+#else
+    return digitalRead(SD_CARD_DETECT_PIN) == HIGH;
+#endif
+}
+
+static bool sdcard_detect_flag(uint8_t flag)
+{
+    return (sdcard_detect_flags & flag) != 0U;
+}
+
+static void sdcard_detect_set_flag(uint8_t flag, bool enabled)
+{
+    if (enabled)
+    {
+        sdcard_detect_flags |= flag;
+    }
+    else
+    {
+        sdcard_detect_flags &= (uint8_t)~flag;
+    }
+}
+
+static void sdcard_detect_clear_pending(void)
+{
+    sdcard_detect_flags &= (uint8_t)~(SD_CARD_DETECT_FLAG_INSERTED_PENDING |
+                                     SD_CARD_DETECT_FLAG_REMOVED_PENDING);
+}
+
+static void sdcard_detect_reset_to_current(void)
+{
+    bool inserted = sdcard_read_detect_pin();
+
+    sdcard_detect_flags = SD_CARD_DETECT_FLAG_KNOWN;
+    if (inserted)
+    {
+        sdcard_detect_flags |= (SD_CARD_DETECT_FLAG_LAST_INSERTED |
+                                SD_CARD_DETECT_FLAG_CANDIDATE_INSERTED);
+    }
+    sdcard_detect_candidate_since_ms = (uint16_t)millis();
+    sdcard_detect_clear_pending();
+}
+
 static uint8_t sdcard_error_code = 0;
 static uint8_t sdcard_error_data = 0;
 
@@ -58,7 +113,9 @@ static void sdcard_set_card_error(void)
 {
     sdcard_close_all_files();
     sdcard_mounted = false;
-    sdcard_set_error_P(PSTR("SD CARD ERROR"));
+    (void)sdcard_detect_poll();
+    sdcard_set_error_P(sdcard_detect_flag(SD_CARD_DETECT_FLAG_REMOVED_PENDING) ?
+                       PSTR("INSERT CARD") : PSTR("SD CARD ERROR"));
 
     if (sd.card() != NULL)
     {
@@ -102,6 +159,14 @@ void sdcard_early_prepare_pins(void)
     digitalWrite(SD_CHIP_SELECT_PIN, HIGH);
 
     pinMode(SD_CARD_DETECT_PIN, INPUT_PULLUP);
+    if (!sdcard_detect_flag(SD_CARD_DETECT_FLAG_KNOWN))
+    {
+        sdcard_detect_reset_to_current();
+    }
+    else
+    {
+        (void)sdcard_detect_poll();
+    }
 }
 
 static void sdcard_send_idle_clocks(void)
@@ -128,6 +193,7 @@ static bool sdcard_initialize(bool force_reinitialize)
         sdcard_set_error_P(PSTR("OK"));
         sdcard_error_code = 0;
         sdcard_error_data = 0;
+        sdcard_detect_reset_to_current();
         return true;
     }
 
@@ -160,16 +226,77 @@ static bool sdcard_initialize(bool force_reinitialize)
     sdcard_set_error_P(PSTR("OK"));
     sdcard_error_code = 0;
     sdcard_error_data = 0;
+    sdcard_detect_reset_to_current();
     return true;
 }
 
 bool sdcard_is_inserted(void)
 {
-#if SD_CARD_DETECT_ACTIVE_LOW
-    return digitalRead(SD_CARD_DETECT_PIN) == LOW;
-#else
-    return digitalRead(SD_CARD_DETECT_PIN) == HIGH;
-#endif
+    return sdcard_read_detect_pin();
+}
+
+bool sdcard_detect_poll(void)
+{
+    bool inserted = sdcard_read_detect_pin();
+    uint16_t now = (uint16_t)millis();
+
+    if (!sdcard_detect_flag(SD_CARD_DETECT_FLAG_KNOWN))
+    {
+        sdcard_detect_reset_to_current();
+        return false;
+    }
+
+    if (inserted == sdcard_detect_flag(SD_CARD_DETECT_FLAG_LAST_INSERTED))
+    {
+        sdcard_detect_set_flag(SD_CARD_DETECT_FLAG_CANDIDATE_INSERTED, inserted);
+        sdcard_detect_candidate_since_ms = now;
+        return false;
+    }
+
+    if (inserted != sdcard_detect_flag(SD_CARD_DETECT_FLAG_CANDIDATE_INSERTED))
+    {
+        sdcard_detect_set_flag(SD_CARD_DETECT_FLAG_CANDIDATE_INSERTED, inserted);
+        sdcard_detect_candidate_since_ms = now;
+        return false;
+    }
+
+    if ((uint16_t)(now - sdcard_detect_candidate_since_ms) <
+        SD_CARD_DETECT_DEBOUNCE_MS)
+    {
+        return false;
+    }
+
+    if (inserted)
+    {
+        sdcard_detect_set_flag(SD_CARD_DETECT_FLAG_INSERTED_PENDING, true);
+        sdcard_detect_set_flag(SD_CARD_DETECT_FLAG_REMOVED_PENDING, false);
+    }
+    else
+    {
+        sdcard_detect_set_flag(SD_CARD_DETECT_FLAG_REMOVED_PENDING, true);
+        sdcard_detect_set_flag(SD_CARD_DETECT_FLAG_INSERTED_PENDING, false);
+    }
+
+    sdcard_detect_set_flag(SD_CARD_DETECT_FLAG_LAST_INSERTED, inserted);
+    return true;
+}
+
+bool sdcard_detect_consume_inserted_edge(void)
+{
+    (void)sdcard_detect_poll();
+    if (!sdcard_detect_flag(SD_CARD_DETECT_FLAG_INSERTED_PENDING))
+    {
+        return false;
+    }
+
+    sdcard_detect_set_flag(SD_CARD_DETECT_FLAG_INSERTED_PENDING, false);
+    return true;
+}
+
+bool sdcard_detect_removed_edge(void)
+{
+    (void)sdcard_detect_poll();
+    return sdcard_detect_flag(SD_CARD_DETECT_FLAG_REMOVED_PENDING);
 }
 
 bool sdcard_init(void)
