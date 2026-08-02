@@ -6,6 +6,7 @@
 
 #define LCD_RS 8
 #define LCD_EN 9
+#define LCD_BACKLIGHT_PIN 10
 
 #define LCD_D4 4
 #define LCD_D5 5
@@ -23,8 +24,16 @@ static LiquidCrystal lcd(
 
 void lcd_init(void)
 {
+    pinMode(LCD_BACKLIGHT_PIN, OUTPUT);
+    lcd_backlight_set(255U);
+
     lcd.begin(16, 2);
     lcd.clear();
+}
+
+void lcd_backlight_set(uint8_t level)
+{
+    analogWrite(LCD_BACKLIGHT_PIN, level);
 }
 
 void lcd_clear(void)

@@ -19,6 +19,7 @@ typedef struct
 void sdcard_early_prepare_pins(void);
 
 bool sdcard_init(void);
+bool sdcard_is_inserted(void);
 
 /* Force a full SdFat/SPI initialization even if the card was mounted before.
    Used after card insertion/retry before the browser reopens root. */

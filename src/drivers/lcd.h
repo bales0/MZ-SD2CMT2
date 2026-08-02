@@ -5,6 +5,7 @@
 #include <avr/pgmspace.h>
 
 void lcd_init(void);
+void lcd_backlight_set(uint8_t level);
 void lcd_clear(void);
 void lcd_home(void);
 void lcd_set_cursor(uint8_t col, uint8_t row);

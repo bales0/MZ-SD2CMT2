@@ -16,7 +16,8 @@
 */
 
 #define SD_CHIP_SELECT_PIN 53
-#define SD_COMPAT_SS_PIN 10
+#define SD_CARD_DETECT_PIN 3
+#define SD_CARD_DETECT_ACTIVE_LOW 1
 
 /*
     CMT/LCD hardware in this project does not share the Mega SPI bus. Dedicated
@@ -100,14 +101,12 @@ void sdcard_early_prepare_pins(void)
     pinMode(SD_CHIP_SELECT_PIN, OUTPUT);
     digitalWrite(SD_CHIP_SELECT_PIN, HIGH);
 
-    pinMode(SD_COMPAT_SS_PIN, OUTPUT);
-    digitalWrite(SD_COMPAT_SS_PIN, HIGH);
+    pinMode(SD_CARD_DETECT_PIN, INPUT_PULLUP);
 }
 
 static void sdcard_send_idle_clocks(void)
 {
     digitalWrite(SD_CHIP_SELECT_PIN, HIGH);
-    digitalWrite(SD_COMPAT_SS_PIN, HIGH);
 
     SPI.begin();
     SPI.beginTransaction(SPISettings(250000, MSBFIRST, SPI_MODE0));
@@ -162,6 +161,15 @@ static bool sdcard_initialize(bool force_reinitialize)
     sdcard_error_code = 0;
     sdcard_error_data = 0;
     return true;
+}
+
+bool sdcard_is_inserted(void)
+{
+#if SD_CARD_DETECT_ACTIVE_LOW
+    return digitalRead(SD_CARD_DETECT_PIN) == LOW;
+#else
+    return digitalRead(SD_CARD_DETECT_PIN) == HIGH;
+#endif
 }
 
 bool sdcard_init(void)
