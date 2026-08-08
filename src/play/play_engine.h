@@ -18,6 +18,11 @@ typedef enum
     PLAY_PROGRESS_PHASE_NORMAL = 0,
     PLAY_PROGRESS_PHASE_ULTRAFAST_LOADER_LOW,
     PLAY_PROGRESS_PHASE_ULTRAFAST_LOADER_HIGH,
+    PLAY_PROGRESS_PHASE_ULTRAFAST_HEADER,
+    PLAY_PROGRESS_PHASE_IC_TURBO_LOADER,
+    PLAY_PROGRESS_PHASE_IC_TURBO_DATA,
+    PLAY_PROGRESS_PHASE_TC_TURBO_LOADER,
+    PLAY_PROGRESS_PHASE_TC_TURBO_DATA,
     PLAY_PROGRESS_PHASE_ULTRAFAST_DATA
 } play_progress_phase_t;
 
@@ -26,7 +31,7 @@ typedef struct
     const char *full_path;
     file_format_t format;
     bool invert_signal;
-    bool ultrafast_enabled;
+    loader_mode_t loader_mode;
 } play_engine_config_t;
 
 void play_engine_init(void);
@@ -52,7 +57,7 @@ uint32_t play_engine_get_total_duration_ms(void);
 /* Byte-based progress for LEP/L16. Other formats return zero here. */
 uint8_t play_engine_get_progress_percent(void);
 play_progress_phase_t play_engine_get_progress_phase(void);
-bool play_engine_is_ultrafast_active(void);
+bool play_engine_is_ul_loader_active(void);
 
 /* Current prepared FIFO fill, as 0..100 %. */
 uint8_t play_engine_get_buffer_fill_percent(void);

@@ -21,6 +21,7 @@ const char* browser_get_selected_full_path(void);
 bool browser_selected_is_directory(void);
 void browser_save_position(void);
 void browser_restore_saved_position(void);
+void browser_clear_status(void);
 
 /* Current browser directory is used as the target for RECxxxx.WAV files. */
 const char* browser_get_current_path(void);

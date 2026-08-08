@@ -1,6 +1,6 @@
 #include "mzf_playback.h"
 #include "timer3b_owner.h"
-#include "mzf_ultrafast.h"
+#include "mzf_loader.h"
 
 #include <Arduino.h>
 #include <avr/io.h>
@@ -42,6 +42,26 @@
 #define MZF_SHORT_LOW_TICKS  MZF_US_TO_TICKS(250U)
 #define MZF_LONG_HIGH_TICKS  MZF_US_TO_TICKS(500U)
 #define MZF_LONG_LOW_TICKS   MZF_US_TO_TICKS(500U)
+#define MZF_IC_1_4_SHORT_HIGH_TICKS MZF_US_TO_TICKS(112U)
+#define MZF_IC_1_4_SHORT_LOW_TICKS  MZF_US_TO_TICKS(80U)
+#define MZF_IC_1_4_LONG_HIGH_TICKS  MZF_US_TO_TICKS(176U)
+#define MZF_IC_1_4_LONG_LOW_TICKS   MZF_US_TO_TICKS(160U)
+#define MZF_IC_1_3_SHORT_HIGH_TICKS MZF_US_TO_TICKS(112U)
+#define MZF_IC_1_3_SHORT_LOW_TICKS  MZF_US_TO_TICKS(96U)
+#define MZF_IC_1_3_LONG_HIGH_TICKS  MZF_US_TO_TICKS(224U)
+#define MZF_IC_1_3_LONG_LOW_TICKS   MZF_US_TO_TICKS(192U)
+#define MZF_IC_1_2_SHORT_HIGH_TICKS MZF_US_TO_TICKS(144U)
+#define MZF_IC_1_2_SHORT_LOW_TICKS  MZF_US_TO_TICKS(112U)
+#define MZF_IC_1_2_LONG_HIGH_TICKS  MZF_US_TO_TICKS(256U)
+#define MZF_IC_1_2_LONG_LOW_TICKS   MZF_US_TO_TICKS(224U)
+#define MZF_TC_1_3_SHORT_HIGH_TICKS MZF_US_TO_TICKS(112U)
+#define MZF_TC_1_3_SHORT_LOW_TICKS  MZF_US_TO_TICKS(112U)
+#define MZF_TC_1_3_LONG_HIGH_TICKS  MZF_US_TO_TICKS(204U)
+#define MZF_TC_1_3_LONG_LOW_TICKS   MZF_US_TO_TICKS(204U)
+#define MZF_TC_1_2_SHORT_HIGH_TICKS MZF_US_TO_TICKS(144U)
+#define MZF_TC_1_2_SHORT_LOW_TICKS  MZF_US_TO_TICKS(144U)
+#define MZF_TC_1_2_LONG_HIGH_TICKS  MZF_US_TO_TICKS(288U)
+#define MZF_TC_1_2_LONG_LOW_TICKS   MZF_US_TO_TICKS(288U)
 
 #define MZF_MZ800_LONG_GAP_SHORT_PULSES 6400U
 #define MZF_MZ800_SHORT_GAP_SHORT_PULSES 6400U
@@ -51,6 +71,7 @@
 #define MZF_MZ800_SHORT_MARK_SHORT_PULSES 20U
 #define MZF_MZ800_TAPE_MARK_FINAL_LONG_PULSES 2U
 #define MZF_MZ800_TRAILING_LONG_PULSES 2U
+#define MZF_TC_LOADER_TRAILING_SHORT_PULSES 98U
 
 #define MZF_FIFO_BYTES WAV_SAMPLE_STREAM_BUFFER_BYTES
 #define MZF_FIFO_CAPACITY (MZF_FIFO_BYTES - 1U)
@@ -62,6 +83,14 @@
     binary image after its 128-byte header in that case.
 */
 #define MZF_BOUNDARY_AUTO_CONTINUE_MS 120U
+#define MZF_IC_TURBO_START_DELAY_MS 345U
+#define MZF_TC_TURBO_START_DELAY_MS 110U
+#define MZF_IC_TURBO_GAP_SHORT_PULSES 5500U
+#define MZF_TC_1_3_TURBO_GAP_SHORT_PULSES 15130U
+#define MZF_TC_1_2_TURBO_GAP_SHORT_PULSES 11239U
+#define MZF_IC_TURBO_MARK_LONG_PULSES 20U
+#define MZF_IC_TURBO_MARK_SHORT_PULSES 20U
+#define MZF_IC_TURBO_MARK_FINAL_LONG_PULSES 2U
 
 #if ((MZF_FIFO_BYTES & (MZF_FIFO_BYTES - 1U)) != 0U)
 #error "MZF FIFO needs a power-of-two size"
@@ -72,6 +101,7 @@ typedef enum
     MZF_STAGE_NONE = 0,
     MZF_STAGE_HEADER,
     MZF_STAGE_DATA,
+    MZF_STAGE_TAPE_TURBO_DATA,
     MZF_STAGE_ULTRAFAST
 } mzf_stage_t;
 
@@ -97,7 +127,9 @@ static char mzf_error_text[17];
 
 static file_format_t mzf_format = FILE_FORMAT_UNKNOWN;
 
-/* MZF/MZT/M12 always use the native Sharp CMT polarity. */
+/* MZF ignores the UI WAV invert setting. TC turbo is auto-inverted to match
+   the verified physical READ phase; IC and native/UL modes stay direct. */
+static bool mzf_wave_invert_signal = false;
 
 static uint8_t mzf_header[MZF_HEADER_BYTES];
 static volatile uint8_t mzf_header_offset = 0U;
@@ -111,6 +143,8 @@ static uint32_t mzf_record_data_length = 0UL;
 /* Absolute end position of the current declared data record. */
 static uint32_t mzf_record_data_file_end = 0UL;
 static uint32_t mzf_record_data_read = 0UL;
+static uint32_t mzf_original_data_offset = 0UL;
+static uint32_t mzf_original_data_length = 0UL;
 /* Calculated in foreground before playback; no progress counters are kept in ISR. */
 static uint32_t mzf_total_duration_ms = 0UL;
 
@@ -128,6 +162,7 @@ static bool mzf_normal_header_preamble = true;
 static volatile bool mzf_boundary_waiting = false;
 static volatile uint8_t mzf_motor_low_seen = 0U;
 static bool mzf_timer_phase_high = false;
+static bool mzf_timer_phase_low_first = false;
 static bool mzf_current_pulse_is_long = false;
 static bool mzf_paused_mid_pulse = false;
 static uint16_t mzf_paused_remaining_ticks = 0U;
@@ -164,6 +199,11 @@ static void mzf_set_error_from_isr_P(PGM_P text, mzf_playback_state_t state)
     mzf_state = (uint8_t)state;
     mz_read_set_fast_from_isr(0U);
     mz_sense_set_fast(true);
+}
+
+static inline void mzf_read_wave_set_from_isr(uint8_t level)
+{
+    mz_read_set_fast_from_isr(level ^ (mzf_wave_invert_signal ? 1U : 0U));
 }
 
 static void mzf_stop_timer_from_isr(void)
@@ -343,15 +383,15 @@ static bool mzf_prefill_data(void)
     return (mzf_record_data_length == 0UL) || (mzf_fifo_used_snapshot() != 0U);
 }
 
-static bool mzf_prepare_ultrafast_loader_data(void)
+static bool mzf_prepare_loader_block_data(void)
 {
     uint8_t *work = wav_sample_stream_get_shared_work_buffer();
-    uint16_t length = mzf_ultrafast_build_loader(work, MZF_REFILL_BLOCK);
+    uint16_t length = mzf_loader_build_loader(work, MZF_REFILL_BLOCK);
     uint16_t write_sequence = 0U;
 
     if ((length == 0U) || (length > MZF_FIFO_CAPACITY))
     {
-        mzf_set_error_P(PSTR("UF LOADER"), MZF_PLAYBACK_BAD_FILE);
+        mzf_set_error_P(PSTR("LDR BLOCK"), MZF_PLAYBACK_BAD_FILE);
         return false;
     }
 
@@ -622,6 +662,173 @@ static bool mzf_calculate_total_duration(void)
 }
 
 
+static bool mzf_stage_uses_tape_turbo_timing(void)
+{
+    return mzf_stage == MZF_STAGE_TAPE_TURBO_DATA;
+}
+
+static bool mzf_stage_uses_low_first_timing(void)
+{
+    return mzf_stage_uses_tape_turbo_timing() && mzf_loader_is_ic_turbo();
+}
+
+static uint16_t mzf_boundary_auto_continue_ms(void)
+{
+    if (((mzf_stage == MZF_STAGE_HEADER) && mzf_loader_is_ic_turbo()) ||
+        ((mzf_stage == MZF_STAGE_DATA) && mzf_loader_is_tape_turbo()))
+    {
+        if ((mzf_stage == MZF_STAGE_DATA) && mzf_loader_is_tc_turbo())
+        {
+            return MZF_TC_TURBO_START_DELAY_MS;
+        }
+        return MZF_IC_TURBO_START_DELAY_MS;
+    }
+    return MZF_BOUNDARY_AUTO_CONTINUE_MS;
+}
+
+static uint16_t mzf_short_high_ticks(void)
+{
+    if (mzf_stage_uses_tape_turbo_timing())
+    {
+        switch (mzf_loader_get_variant())
+        {
+            case MZF_LOADER_VARIANT_IC_1_2: return MZF_IC_1_2_SHORT_HIGH_TICKS;
+            case MZF_LOADER_VARIANT_IC_1_3: return MZF_IC_1_3_SHORT_HIGH_TICKS;
+            case MZF_LOADER_VARIANT_TC_1_2: return MZF_TC_1_2_SHORT_HIGH_TICKS;
+            case MZF_LOADER_VARIANT_TC_1_3: return MZF_TC_1_3_SHORT_HIGH_TICKS;
+            default: return MZF_IC_1_4_SHORT_HIGH_TICKS;
+        }
+    }
+    return MZF_SHORT_HIGH_TICKS;
+}
+
+static uint16_t mzf_short_low_ticks(void)
+{
+    if (mzf_stage_uses_tape_turbo_timing())
+    {
+        switch (mzf_loader_get_variant())
+        {
+            case MZF_LOADER_VARIANT_IC_1_2: return MZF_IC_1_2_SHORT_LOW_TICKS;
+            case MZF_LOADER_VARIANT_IC_1_3: return MZF_IC_1_3_SHORT_LOW_TICKS;
+            case MZF_LOADER_VARIANT_TC_1_2: return MZF_TC_1_2_SHORT_LOW_TICKS;
+            case MZF_LOADER_VARIANT_TC_1_3: return MZF_TC_1_3_SHORT_LOW_TICKS;
+            default: return MZF_IC_1_4_SHORT_LOW_TICKS;
+        }
+    }
+    return MZF_SHORT_LOW_TICKS;
+}
+
+static uint16_t mzf_long_high_ticks(void)
+{
+    if (mzf_stage_uses_tape_turbo_timing())
+    {
+        switch (mzf_loader_get_variant())
+        {
+            case MZF_LOADER_VARIANT_IC_1_2: return MZF_IC_1_2_LONG_HIGH_TICKS;
+            case MZF_LOADER_VARIANT_IC_1_3: return MZF_IC_1_3_LONG_HIGH_TICKS;
+            case MZF_LOADER_VARIANT_TC_1_2: return MZF_TC_1_2_LONG_HIGH_TICKS;
+            case MZF_LOADER_VARIANT_TC_1_3: return MZF_TC_1_3_LONG_HIGH_TICKS;
+            default: return MZF_IC_1_4_LONG_HIGH_TICKS;
+        }
+    }
+    return MZF_LONG_HIGH_TICKS;
+}
+
+static uint16_t mzf_long_low_ticks(void)
+{
+    if (mzf_stage_uses_tape_turbo_timing())
+    {
+        switch (mzf_loader_get_variant())
+        {
+            case MZF_LOADER_VARIANT_IC_1_2: return MZF_IC_1_2_LONG_LOW_TICKS;
+            case MZF_LOADER_VARIANT_IC_1_3: return MZF_IC_1_3_LONG_LOW_TICKS;
+            case MZF_LOADER_VARIANT_TC_1_2: return MZF_TC_1_2_LONG_LOW_TICKS;
+            case MZF_LOADER_VARIANT_TC_1_3: return MZF_TC_1_3_LONG_LOW_TICKS;
+            default: return MZF_IC_1_4_LONG_LOW_TICKS;
+        }
+    }
+    return MZF_LONG_LOW_TICKS;
+}
+
+static void mzf_set_short_pulse(uint16_t *high_ticks, uint16_t *low_ticks)
+{
+    *high_ticks = mzf_short_high_ticks();
+    *low_ticks = mzf_short_low_ticks();
+}
+
+static void mzf_set_long_pulse(uint16_t *high_ticks, uint16_t *low_ticks)
+{
+    *high_ticks = mzf_long_high_ticks();
+    *low_ticks = mzf_long_low_ticks();
+}
+
+static uint16_t mzf_gap_short_pulses(void)
+{
+    if (mzf_stage == MZF_STAGE_HEADER)
+    {
+        return MZF_MZ800_LONG_GAP_SHORT_PULSES;
+    }
+    if (mzf_stage == MZF_STAGE_TAPE_TURBO_DATA)
+    {
+        switch (mzf_loader_get_variant())
+        {
+            case MZF_LOADER_VARIANT_TC_1_2:
+                return MZF_TC_1_2_TURBO_GAP_SHORT_PULSES;
+            case MZF_LOADER_VARIANT_TC_1_3:
+                return MZF_TC_1_3_TURBO_GAP_SHORT_PULSES;
+            default:
+                return MZF_IC_TURBO_GAP_SHORT_PULSES;
+        }
+    }
+    return MZF_MZ800_SHORT_GAP_SHORT_PULSES;
+}
+
+static uint16_t mzf_mark_long_pulses(void)
+{
+    if (mzf_stage == MZF_STAGE_HEADER)
+    {
+        return MZF_MZ800_LONG_MARK_LONG_PULSES;
+    }
+    if (mzf_stage == MZF_STAGE_TAPE_TURBO_DATA)
+    {
+        return MZF_IC_TURBO_MARK_LONG_PULSES;
+    }
+    return MZF_MZ800_SHORT_MARK_LONG_PULSES;
+}
+
+static uint16_t mzf_mark_short_pulses(void)
+{
+    if (mzf_stage == MZF_STAGE_HEADER)
+    {
+        return MZF_MZ800_LONG_MARK_SHORT_PULSES;
+    }
+    if (mzf_stage == MZF_STAGE_TAPE_TURBO_DATA)
+    {
+        return MZF_IC_TURBO_MARK_SHORT_PULSES;
+    }
+    return MZF_MZ800_SHORT_MARK_SHORT_PULSES;
+}
+
+static uint16_t mzf_mark_final_long_pulses(void)
+{
+    return (mzf_stage == MZF_STAGE_TAPE_TURBO_DATA) ?
+        MZF_IC_TURBO_MARK_FINAL_LONG_PULSES :
+        MZF_MZ800_TAPE_MARK_FINAL_LONG_PULSES;
+}
+
+static bool mzf_stage_uses_tc_trailing(void)
+{
+    return mzf_loader_is_tc_turbo() &&
+           ((mzf_stage == MZF_STAGE_DATA) ||
+            (mzf_stage == MZF_STAGE_TAPE_TURBO_DATA));
+}
+
+static uint16_t mzf_trailing_pulses(void)
+{
+    return mzf_stage_uses_tc_trailing() ?
+        MZF_TC_LOADER_TRAILING_SHORT_PULSES :
+        MZF_MZ800_TRAILING_LONG_PULSES;
+}
 static void mzf_begin_normal_stage(mzf_stage_t stage)
 {
     mzf_stage = stage;
@@ -639,6 +846,7 @@ static void mzf_begin_normal_stage(mzf_stage_t stage)
     mzf_boundary_auto_start_ms = 0U;
     mzf_paused_mid_pulse = false;
     mzf_timer_phase_high = false;
+    mzf_timer_phase_low_first = false;
     mzf_current_pulse_is_long = false;
 
     if (stage == MZF_STAGE_HEADER)
@@ -650,7 +858,8 @@ static void mzf_begin_normal_stage(mzf_stage_t stage)
 static uint32_t mzf_stage_byte_count(void)
 {
     if (mzf_stage == MZF_STAGE_HEADER) return MZF_HEADER_BYTES;
-    if (mzf_stage == MZF_STAGE_DATA) return mzf_record_data_length;
+    if ((mzf_stage == MZF_STAGE_DATA) ||
+        (mzf_stage == MZF_STAGE_TAPE_TURBO_DATA)) return mzf_record_data_length;
     return 0UL;
 }
 
@@ -671,7 +880,8 @@ static bool mzf_next_source_byte_from_isr(uint8_t *value)
         return true;
     }
 
-    if (mzf_stage == MZF_STAGE_DATA)
+    if ((mzf_stage == MZF_STAGE_DATA) ||
+        (mzf_stage == MZF_STAGE_TAPE_TURBO_DATA))
     {
         if (!mzf_fifo_pop_from_isr(value))
         {
@@ -698,49 +908,40 @@ static bool mzf_next_normal_pulse_from_isr(uint16_t *high_ticks,
         switch (mzf_normal_step)
         {
             case MZF_STEP_BEGIN:
-                mzf_normal_loop = mzf_normal_header_preamble ?
-                    MZF_MZ800_LONG_GAP_SHORT_PULSES :
-                    MZF_MZ800_SHORT_GAP_SHORT_PULSES;
+                mzf_normal_loop = mzf_gap_short_pulses();
                 mzf_normal_step = MZF_STEP_GAP;
                 continue;
 
             case MZF_STEP_GAP:
                 if (mzf_normal_loop == 0U)
                 {
-                    mzf_normal_loop = mzf_normal_header_preamble ?
-                        MZF_MZ800_LONG_MARK_LONG_PULSES :
-                        MZF_MZ800_SHORT_MARK_LONG_PULSES;
+                    mzf_normal_loop = mzf_mark_long_pulses();
                     mzf_normal_step = MZF_STEP_TAPE_MARK_LONG;
                     continue;
                 }
-                *high_ticks = MZF_SHORT_HIGH_TICKS;
-                *low_ticks = MZF_SHORT_LOW_TICKS;
+                mzf_set_short_pulse(high_ticks, low_ticks);
                 mzf_normal_loop--;
                 return true;
 
             case MZF_STEP_TAPE_MARK_LONG:
                 if (mzf_normal_loop == 0U)
                 {
-                    mzf_normal_loop = mzf_normal_header_preamble ?
-                        MZF_MZ800_LONG_MARK_SHORT_PULSES :
-                        MZF_MZ800_SHORT_MARK_SHORT_PULSES;
+                    mzf_normal_loop = mzf_mark_short_pulses();
                     mzf_normal_step = MZF_STEP_TAPE_MARK_SHORT;
                     continue;
                 }
-                *high_ticks = MZF_LONG_HIGH_TICKS;
-                *low_ticks = MZF_LONG_LOW_TICKS;
+                mzf_set_long_pulse(high_ticks, low_ticks);
                 mzf_normal_loop--;
                 return true;
 
             case MZF_STEP_TAPE_MARK_SHORT:
                 if (mzf_normal_loop == 0U)
                 {
-                    mzf_normal_loop = MZF_MZ800_TAPE_MARK_FINAL_LONG_PULSES;
+                    mzf_normal_loop = mzf_mark_final_long_pulses();
                     mzf_normal_step = MZF_STEP_TAPE_MARK_FINAL;
                     continue;
                 }
-                *high_ticks = MZF_SHORT_HIGH_TICKS;
-                *low_ticks = MZF_SHORT_LOW_TICKS;
+                mzf_set_short_pulse(high_ticks, low_ticks);
                 mzf_normal_loop--;
                 return true;
 
@@ -754,8 +955,7 @@ static bool mzf_next_normal_pulse_from_isr(uint16_t *high_ticks,
                     mzf_normal_step = MZF_STEP_BYTE_LOAD;
                     continue;
                 }
-                *high_ticks = MZF_LONG_HIGH_TICKS;
-                *low_ticks = MZF_LONG_LOW_TICKS;
+                mzf_set_long_pulse(high_ticks, low_ticks);
                 mzf_normal_loop--;
                 return true;
 
@@ -784,14 +984,12 @@ static bool mzf_next_normal_pulse_from_isr(uint16_t *high_ticks,
                 }
                 if ((mzf_normal_data & 0x80U) != 0U)
                 {
-                    *high_ticks = MZF_LONG_HIGH_TICKS;
-                    *low_ticks = MZF_LONG_LOW_TICKS;
+                    mzf_set_long_pulse(high_ticks, low_ticks);
                     mzf_normal_checksum++;
                 }
                 else
                 {
-                    *high_ticks = MZF_SHORT_HIGH_TICKS;
-                    *low_ticks = MZF_SHORT_LOW_TICKS;
+                    mzf_set_short_pulse(high_ticks, low_ticks);
                 }
                 mzf_normal_data <<= 1U;
                 mzf_normal_bits_remaining--;
@@ -799,15 +997,14 @@ static bool mzf_next_normal_pulse_from_isr(uint16_t *high_ticks,
 
             case MZF_STEP_BYTE_STOP:
                 /* MZ-800 ROM format: one long stop pulse follows every byte. */
-                *high_ticks = MZF_LONG_HIGH_TICKS;
-                *low_ticks = MZF_LONG_LOW_TICKS;
+                mzf_set_long_pulse(high_ticks, low_ticks);
                 mzf_normal_step = MZF_STEP_BYTE_LOAD;
                 return true;
 
             case MZF_STEP_CHECKSUM_LOAD:
                 if (mzf_normal_checksum_byte_index >= 2U)
                 {
-                    mzf_normal_loop = MZF_MZ800_TRAILING_LONG_PULSES;
+                    mzf_normal_loop = mzf_trailing_pulses();
                     mzf_normal_step = MZF_STEP_TRAILING_LONGS;
                     continue;
                 }
@@ -827,21 +1024,18 @@ static bool mzf_next_normal_pulse_from_isr(uint16_t *high_ticks,
                 }
                 if ((mzf_normal_data & 0x80U) != 0U)
                 {
-                    *high_ticks = MZF_LONG_HIGH_TICKS;
-                    *low_ticks = MZF_LONG_LOW_TICKS;
+                    mzf_set_long_pulse(high_ticks, low_ticks);
                 }
                 else
                 {
-                    *high_ticks = MZF_SHORT_HIGH_TICKS;
-                    *low_ticks = MZF_SHORT_LOW_TICKS;
+                    mzf_set_short_pulse(high_ticks, low_ticks);
                 }
                 mzf_normal_data <<= 1U;
                 mzf_normal_bits_remaining--;
                 return true;
 
             case MZF_STEP_CHECKSUM_STOP:
-                *high_ticks = MZF_LONG_HIGH_TICKS;
-                *low_ticks = MZF_LONG_LOW_TICKS;
+                mzf_set_long_pulse(high_ticks, low_ticks);
                 mzf_normal_step = MZF_STEP_CHECKSUM_LOAD;
                 return true;
 
@@ -851,8 +1045,14 @@ static bool mzf_next_normal_pulse_from_isr(uint16_t *high_ticks,
                     mzf_normal_step = MZF_STEP_BOUNDARY;
                     continue;
                 }
-                *high_ticks = MZF_LONG_HIGH_TICKS;
-                *low_ticks = MZF_LONG_LOW_TICKS;
+                if (mzf_stage_uses_tc_trailing())
+                {
+                    mzf_set_short_pulse(high_ticks, low_ticks);
+                }
+                else
+                {
+                    mzf_set_long_pulse(high_ticks, low_ticks);
+                }
                 mzf_normal_loop--;
                 return true;
 
@@ -864,7 +1064,7 @@ static bool mzf_next_normal_pulse_from_isr(uint16_t *high_ticks,
                     Earlier records remain at the boundary and advance only
                     after the monitor turns MOTOR off.
                 */
-                if ((mzf_stage == MZF_STAGE_DATA) && mzf_ultrafast_is_active())
+                if ((mzf_stage == MZF_STAGE_DATA) && mzf_loader_is_ul_active())
                 {
                     mzf_boundary_waiting = true;
                     mzf_stop_timer_from_isr();
@@ -872,8 +1072,9 @@ static bool mzf_next_normal_pulse_from_isr(uint16_t *high_ticks,
                     return false;
                 }
 
-                if ((mzf_stage == MZF_STAGE_DATA) &&
-                    (mzf_record_data_file_end >= mzf_file_size))
+                if ((mzf_stage == MZF_STAGE_TAPE_TURBO_DATA) ||
+                    ((mzf_stage == MZF_STAGE_DATA) &&
+                     (mzf_record_data_file_end >= mzf_file_size)))
                 {
                     mzf_stop_timer_from_isr();
                     mz_read_set_fast_from_isr(0U);
@@ -884,7 +1085,7 @@ static bool mzf_next_normal_pulse_from_isr(uint16_t *high_ticks,
 
                 mzf_boundary_waiting = true;
                 mzf_stop_timer_from_isr();
-                mz_read_set_fast_from_isr(0U);
+                mzf_read_wave_set_from_isr(0U);
                 return false;
 
             default:
@@ -904,12 +1105,23 @@ static bool mzf_start_next_normal_pulse_from_isr(void)
         return false;
     }
 
-    mzf_timer_phase_high = true;
-    mzf_current_pulse_is_long = (high_ticks == MZF_LONG_HIGH_TICKS);
-    mz_read_set_fast_from_isr(1U);
-    (void)low_ticks;
-    mzf_paused_remaining_ticks = high_ticks;
-    mzf_timer_start_first(high_ticks);
+    mzf_current_pulse_is_long = (high_ticks == mzf_long_high_ticks());
+    if (mzf_stage_uses_low_first_timing())
+    {
+        mzf_timer_phase_high = false;
+        mzf_timer_phase_low_first = true;
+        mzf_read_wave_set_from_isr(0U);
+        mzf_paused_remaining_ticks = low_ticks;
+        mzf_timer_start_first(low_ticks);
+    }
+    else
+    {
+        mzf_timer_phase_high = true;
+        mzf_timer_phase_low_first = false;
+        mzf_read_wave_set_from_isr(1U);
+        mzf_paused_remaining_ticks = high_ticks;
+        mzf_timer_start_first(high_ticks);
+    }
     return true;
 }
 
@@ -917,7 +1129,13 @@ static bool mzf_start_next_normal_pulse_from_isr(void)
 static uint16_t mzf_current_low_ticks(void)
 {
     return mzf_current_pulse_is_long ?
-        MZF_LONG_LOW_TICKS : MZF_SHORT_LOW_TICKS;
+        mzf_long_low_ticks() : mzf_short_low_ticks();
+}
+
+static uint16_t mzf_current_high_ticks(void)
+{
+    return mzf_current_pulse_is_long ?
+        mzf_long_high_ticks() : mzf_short_high_ticks();
 }
 
 static bool mzf_start_normal_output(void)
@@ -931,12 +1149,27 @@ static bool mzf_start_normal_output(void)
 
 static bool mzf_start_ultrafast_output(void)
 {
-    if (!mzf_ultrafast_begin())
+    if (!mzf_loader_begin())
     {
-        mzf_set_error(mzf_ultrafast_get_error_text(), MZF_PLAYBACK_IO_ERROR);
+        mzf_set_error(mzf_loader_get_error_text(), MZF_PLAYBACK_IO_ERROR);
         return false;
     }
     return true;
+}
+
+static bool mzf_prepare_tape_turbo_payload(void)
+{
+    if (!sdcard_file_seek(mzf_original_data_offset))
+    {
+        mzf_set_error_P(PSTR("TURB SEEK"), MZF_PLAYBACK_IO_ERROR);
+        return false;
+    }
+
+    mzf_record_data_length = mzf_original_data_length;
+    mzf_record_data_file_end = mzf_original_data_offset + mzf_original_data_length;
+    mzf_record_data_read = 0UL;
+    mzf_fifo_reset();
+    return mzf_prefill_data();
 }
 
 static bool mzf_start_next_mzt_record(void)
@@ -963,17 +1196,46 @@ static bool mzf_advance_after_boundary(void)
 {
     if (mzf_stage == MZF_STAGE_HEADER)
     {
+        if (mzf_loader_is_header_only())
+        {
+            mzf_stage = MZF_STAGE_ULTRAFAST;
+            mzf_boundary_waiting = false;
+            mzf_motor_low_seen = 0U;
+            mzf_boundary_auto_timer_armed = false;
+            mzf_boundary_auto_start_ms = 0U;
+            return true;
+        }
+        if (mzf_loader_is_ic_turbo())
+        {
+            if (!mzf_prepare_tape_turbo_payload())
+            {
+                return false;
+            }
+            mzf_begin_normal_stage(MZF_STAGE_TAPE_TURBO_DATA);
+            return true;
+        }
         mzf_begin_normal_stage(MZF_STAGE_DATA);
         return true;
     }
 
-    if (mzf_stage != MZF_STAGE_DATA)
+    if ((mzf_stage == MZF_STAGE_DATA) && mzf_loader_is_tape_turbo())
+    {
+        if (!mzf_prepare_tape_turbo_payload())
+        {
+            return false;
+        }
+        mzf_begin_normal_stage(MZF_STAGE_TAPE_TURBO_DATA);
+        return true;
+    }
+
+    if ((mzf_stage != MZF_STAGE_DATA) &&
+        (mzf_stage != MZF_STAGE_TAPE_TURBO_DATA))
     {
         mzf_set_error_P(PSTR("MZF STATE"), MZF_PLAYBACK_BAD_FILE);
         return false;
     }
 
-    if (mzf_ultrafast_is_active())
+    if ((mzf_stage == MZF_STAGE_DATA) && mzf_loader_is_ul_active())
     {
         mzf_stage = MZF_STAGE_ULTRAFAST;
         mzf_boundary_waiting = false;
@@ -990,7 +1252,8 @@ static bool mzf_advance_after_boundary(void)
             return mzf_start_next_mzt_record();
         }
     }
-    else if (sdcard_file_position() < mzf_file_size)
+    else if ((mzf_stage == MZF_STAGE_DATA) &&
+             (sdcard_file_position() < mzf_file_size))
     {
         /* Preserve legacy MZF/M12 compatibility: trailing bytes are emitted
            as a follow-on data block after the next MOTOR restart. */
@@ -1020,7 +1283,8 @@ static bool mzf_advance_after_boundary(void)
 */
 static void mzf_service_boundary_auto_continue(void)
 {
-    bool ultrafast_boundary;
+    bool ul_loader_boundary;
+    bool tc_turbo_boundary;
     uint16_t now;
 
     if (!mzf_boundary_waiting || (mzf_state != MZF_PLAYBACK_RUNNING))
@@ -1028,16 +1292,21 @@ static void mzf_service_boundary_auto_continue(void)
         return;
     }
 
-    ultrafast_boundary = (mzf_stage == MZF_STAGE_DATA) &&
-                         mzf_ultrafast_is_active();
+    ul_loader_boundary = mzf_loader_is_ul_active() &&
+                         (((mzf_stage == MZF_STAGE_DATA) &&
+                           !mzf_loader_is_header_only()) ||
+                          ((mzf_stage == MZF_STAGE_HEADER) &&
+                           mzf_loader_is_header_only()));
+    tc_turbo_boundary = (mzf_stage == MZF_STAGE_DATA) &&
+                        mzf_loader_is_tc_turbo();
 
     /* Let the controller preserve the native MOTOR-low pause behavior. */
-    if (!ultrafast_boundary && !mz_motor_get())
+    if (!ul_loader_boundary && !mz_motor_get())
     {
         return;
     }
 
-    if (!ultrafast_boundary)
+    if (!ul_loader_boundary)
     {
         now = (uint16_t)millis();
         if (!mzf_boundary_auto_timer_armed)
@@ -1047,14 +1316,14 @@ static void mzf_service_boundary_auto_continue(void)
 
             /* A low edge observed at timer precision has already completed the
                legacy boundary; do not add an unnecessary silent delay. */
-            if (mzf_motor_low_seen == 0U)
+            if ((mzf_motor_low_seen == 0U) || tc_turbo_boundary)
             {
                 return;
             }
         }
-        else if ((mzf_motor_low_seen == 0U) &&
+        else if (((mzf_motor_low_seen == 0U) || tc_turbo_boundary) &&
                  ((uint16_t)(now - mzf_boundary_auto_start_ms) <
-                  MZF_BOUNDARY_AUTO_CONTINUE_MS))
+                  mzf_boundary_auto_continue_ms()))
         {
             return;
         }
@@ -1088,6 +1357,7 @@ static void mzf_service_boundary_auto_continue(void)
 void mzf_playback_init(void)
 {
     mzf_stop_timer_from_foreground(true);
+    mzf_wave_invert_signal = false;
     mzf_state = MZF_PLAYBACK_STOPPED;
     mzf_error_text[0] = '\0';
     mzf_format = FILE_FORMAT_UNKNOWN;
@@ -1096,25 +1366,29 @@ void mzf_playback_init(void)
     mzf_record_data_length = 0UL;
     mzf_record_data_file_end = 0UL;
     mzf_record_data_read = 0UL;
+    mzf_original_data_offset = 0UL;
+    mzf_original_data_length = 0UL;
     mzf_stage = MZF_STAGE_NONE;
     mzf_boundary_waiting = false;
     mzf_motor_low_seen = 0U;
     mzf_boundary_auto_timer_armed = false;
     mzf_boundary_auto_start_ms = 0U;
     mzf_timer_phase_high = false;
+    mzf_timer_phase_low_first = false;
     mzf_current_pulse_is_long = false;
     mzf_paused_mid_pulse = false;
     mzf_paused_remaining_ticks = 0U;
     mzf_fifo_reset();
-    mzf_ultrafast_reset();
+    mzf_loader_reset();
 }
 
 bool mzf_playback_prepare(const char *path,
                           file_format_t format,
-                          bool ultrafast_enabled)
+                          loader_mode_t loader_mode)
 {
     mzf_playback_stop();
     mzf_error_text[0] = '\0';
+    mzf_wave_invert_signal = false;
 
     if ((path == NULL) || !file_format_is_sharp_tape(format))
     {
@@ -1144,11 +1418,17 @@ bool mzf_playback_prepare(const char *path,
         return false;
     }
 
-    if (mzf_ultrafast_prepare(format, ultrafast_enabled, mzf_header,
+    mzf_original_data_offset = sdcard_file_position();
+    mzf_original_data_length = mzf_record_data_length;
+
+    if (mzf_loader_prepare(format, loader_mode, mzf_header,
                               mzf_file_size, sdcard_file_position()))
     {
-        mzf_ultrafast_patch_loader_header(mzf_header);
-        if (!mzf_prepare_ultrafast_loader_data())
+        mzf_wave_invert_signal = mzf_loader_is_tc_turbo();
+        mzf_loader_patch_loader_header(mzf_header);
+        if (!mzf_loader_is_header_only() &&
+            !mzf_loader_is_ic_turbo() &&
+            !mzf_prepare_loader_block_data())
         {
             sdcard_file_close();
             return false;
@@ -1259,15 +1539,19 @@ void mzf_playback_stop(void)
     mzf_boundary_auto_timer_armed = false;
     mzf_boundary_auto_start_ms = 0U;
     mzf_timer_phase_high = false;
+    mzf_timer_phase_low_first = false;
     mzf_current_pulse_is_long = false;
     mzf_paused_mid_pulse = false;
     mzf_paused_remaining_ticks = 0U;
     mzf_file_size = 0UL;
     mzf_total_duration_ms = 0UL;
+    mzf_wave_invert_signal = false;
     mzf_record_data_length = 0UL;
     mzf_record_data_file_end = 0UL;
     mzf_record_data_read = 0UL;
-    mzf_ultrafast_reset();
+    mzf_original_data_offset = 0UL;
+    mzf_original_data_length = 0UL;
+    mzf_loader_reset();
     mz_sense_set(true);
 }
 
@@ -1286,12 +1570,12 @@ void mzf_playback_service(void)
 
     if (mzf_stage == MZF_STAGE_ULTRAFAST)
     {
-        if (!mzf_ultrafast_pump(MZF_ULTRAFAST_PUMP_BYTES))
+        if (!mzf_loader_pump(MZF_LOADER_PUMP_BYTES))
         {
-            mzf_set_error(mzf_ultrafast_get_error_text(), MZF_PLAYBACK_IO_ERROR);
+            mzf_set_error(mzf_loader_get_error_text(), MZF_PLAYBACK_IO_ERROR);
             return;
         }
-        if (mzf_ultrafast_is_finished())
+        if (mzf_loader_is_finished())
         {
             mzf_state = MZF_PLAYBACK_FINISHED;
             mz_sense_set(true);
@@ -1299,7 +1583,8 @@ void mzf_playback_service(void)
         return;
     }
 
-    if ((mzf_stage == MZF_STAGE_DATA) && !mzf_boundary_waiting &&
+    if (((mzf_stage == MZF_STAGE_DATA) ||
+         (mzf_stage == MZF_STAGE_TAPE_TURBO_DATA)) && !mzf_boundary_waiting &&
         (mzf_fifo_used_snapshot() <= MZF_REFILL_BLOCK) &&
         (mzf_record_data_read < mzf_record_data_length))
     {
@@ -1323,7 +1608,8 @@ uint8_t mzf_playback_get_buffer_fill_percent(void)
 {
     uint32_t percent;
 
-    if (mzf_stage != MZF_STAGE_DATA)
+    if ((mzf_stage != MZF_STAGE_DATA) &&
+        (mzf_stage != MZF_STAGE_TAPE_TURBO_DATA))
     {
         return 100U;
     }
@@ -1341,45 +1627,270 @@ uint32_t mzf_playback_get_total_duration_ms(void)
     return mzf_total_duration_ms;
 }
 
+static uint16_t mzf_progress_gap_pulses(mzf_stage_t stage)
+{
+    if (stage == MZF_STAGE_HEADER)
+    {
+        return MZF_MZ800_LONG_GAP_SHORT_PULSES;
+    }
+    if (stage == MZF_STAGE_TAPE_TURBO_DATA)
+    {
+        switch (mzf_loader_get_variant())
+        {
+            case MZF_LOADER_VARIANT_TC_1_2:
+                return MZF_TC_1_2_TURBO_GAP_SHORT_PULSES;
+            case MZF_LOADER_VARIANT_TC_1_3:
+                return MZF_TC_1_3_TURBO_GAP_SHORT_PULSES;
+            default:
+                return MZF_IC_TURBO_GAP_SHORT_PULSES;
+        }
+    }
+    return MZF_MZ800_SHORT_GAP_SHORT_PULSES;
+}
+
+static uint16_t mzf_progress_mark_long_pulses(mzf_stage_t stage)
+{
+    if (stage == MZF_STAGE_HEADER)
+    {
+        return MZF_MZ800_LONG_MARK_LONG_PULSES;
+    }
+    return (stage == MZF_STAGE_TAPE_TURBO_DATA) ?
+        MZF_IC_TURBO_MARK_LONG_PULSES :
+        MZF_MZ800_SHORT_MARK_LONG_PULSES;
+}
+
+static uint16_t mzf_progress_mark_short_pulses(mzf_stage_t stage)
+{
+    if (stage == MZF_STAGE_HEADER)
+    {
+        return MZF_MZ800_LONG_MARK_SHORT_PULSES;
+    }
+    return (stage == MZF_STAGE_TAPE_TURBO_DATA) ?
+        MZF_IC_TURBO_MARK_SHORT_PULSES :
+        MZF_MZ800_SHORT_MARK_SHORT_PULSES;
+}
+
+static uint16_t mzf_progress_mark_final_pulses(mzf_stage_t stage)
+{
+    return (stage == MZF_STAGE_TAPE_TURBO_DATA) ?
+        MZF_IC_TURBO_MARK_FINAL_LONG_PULSES :
+        MZF_MZ800_TAPE_MARK_FINAL_LONG_PULSES;
+}
+
+static uint16_t mzf_progress_trailing_pulses(mzf_stage_t stage)
+{
+    return (mzf_loader_is_tc_turbo() &&
+            ((stage == MZF_STAGE_DATA) ||
+             (stage == MZF_STAGE_TAPE_TURBO_DATA))) ?
+        MZF_TC_LOADER_TRAILING_SHORT_PULSES :
+        MZF_MZ800_TRAILING_LONG_PULSES;
+}
+
+static uint16_t mzf_progress_done_pulses(uint16_t total, uint16_t remaining)
+{
+    return (remaining >= total) ? 0U : (uint16_t)(total - remaining);
+}
+
+static uint32_t mzf_progress_stage_total_units(mzf_stage_t stage,
+                                               uint32_t byte_count)
+{
+    return (uint32_t)mzf_progress_gap_pulses(stage) +
+           (uint32_t)mzf_progress_mark_long_pulses(stage) +
+           (uint32_t)mzf_progress_mark_short_pulses(stage) +
+           (uint32_t)mzf_progress_mark_final_pulses(stage) +
+           (byte_count * 9UL) + 18UL +
+           (uint32_t)mzf_progress_trailing_pulses(stage);
+}
+
+static uint32_t mzf_progress_byte_units(mzf_normal_step_t step,
+                                        uint32_t bytes_read,
+                                        uint32_t byte_count,
+                                        uint8_t bits_remaining)
+{
+    if (bytes_read > byte_count) bytes_read = byte_count;
+
+    if (((step == MZF_STEP_BYTE_BITS) ||
+         (step == MZF_STEP_BYTE_STOP)) && (bytes_read != 0UL))
+    {
+        uint32_t done = (bytes_read - 1UL) * 9UL;
+        done += (step == MZF_STEP_BYTE_BITS) ?
+            (uint32_t)(8U - bits_remaining) : 8UL;
+        return done;
+    }
+
+    return bytes_read * 9UL;
+}
+
+static uint32_t mzf_progress_checksum_units(mzf_normal_step_t step,
+                                            uint8_t checksum_byte_index,
+                                            uint8_t bits_remaining)
+{
+    uint32_t done;
+
+    if (checksum_byte_index > 2U) checksum_byte_index = 2U;
+    done = (uint32_t)checksum_byte_index * 9UL;
+
+    if (((step == MZF_STEP_CHECKSUM_BITS) ||
+         (step == MZF_STEP_CHECKSUM_STOP)) && (checksum_byte_index != 0U))
+    {
+        done = (uint32_t)(checksum_byte_index - 1U) * 9UL;
+        done += (step == MZF_STEP_CHECKSUM_BITS) ?
+            (uint32_t)(8U - bits_remaining) : 8UL;
+    }
+
+    return (done > 18UL) ? 18UL : done;
+}
+
+static uint32_t mzf_progress_stage_done_units(mzf_stage_t stage,
+                                              mzf_normal_step_t step,
+                                              uint16_t loop,
+                                              uint32_t bytes_read,
+                                              uint32_t byte_count,
+                                              uint8_t bits_remaining,
+                                              uint8_t checksum_byte_index)
+{
+    uint16_t gap = mzf_progress_gap_pulses(stage);
+    uint16_t mark_long = mzf_progress_mark_long_pulses(stage);
+    uint16_t mark_short = mzf_progress_mark_short_pulses(stage);
+    uint16_t mark_final = mzf_progress_mark_final_pulses(stage);
+    uint32_t preamble = (uint32_t)gap + (uint32_t)mark_long +
+                        (uint32_t)mark_short + (uint32_t)mark_final;
+    uint32_t data_units = byte_count * 9UL;
+
+    switch (step)
+    {
+        case MZF_STEP_BEGIN:
+            return 0UL;
+        case MZF_STEP_GAP:
+            return (uint32_t)mzf_progress_done_pulses(gap, loop);
+        case MZF_STEP_TAPE_MARK_LONG:
+            return (uint32_t)gap +
+                   (uint32_t)mzf_progress_done_pulses(mark_long, loop);
+        case MZF_STEP_TAPE_MARK_SHORT:
+            return (uint32_t)gap + (uint32_t)mark_long +
+                   (uint32_t)mzf_progress_done_pulses(mark_short, loop);
+        case MZF_STEP_TAPE_MARK_FINAL:
+            return (uint32_t)gap + (uint32_t)mark_long +
+                   (uint32_t)mark_short +
+                   (uint32_t)mzf_progress_done_pulses(mark_final, loop);
+        case MZF_STEP_BYTE_LOAD:
+        case MZF_STEP_BYTE_BITS:
+        case MZF_STEP_BYTE_STOP:
+            return preamble + mzf_progress_byte_units(step, bytes_read,
+                                                       byte_count,
+                                                       bits_remaining);
+        case MZF_STEP_CHECKSUM_LOAD:
+        case MZF_STEP_CHECKSUM_BITS:
+        case MZF_STEP_CHECKSUM_STOP:
+            return preamble + data_units +
+                   mzf_progress_checksum_units(step, checksum_byte_index,
+                                               bits_remaining);
+        case MZF_STEP_TRAILING_LONGS:
+            return preamble + data_units + 18UL +
+                   (uint32_t)mzf_progress_done_pulses(
+                       mzf_progress_trailing_pulses(stage), loop);
+        case MZF_STEP_BOUNDARY:
+            return mzf_progress_stage_total_units(stage, byte_count);
+        default:
+            return 0UL;
+    }
+}
+
 uint8_t mzf_playback_get_progress_percent(void)
 {
     uint32_t percent;
     uint32_t total;
     uint32_t done = 0UL;
+    uint32_t header_units;
+    uint32_t loader_units = 0UL;
+    uint32_t data_units = 0UL;
+    uint32_t stage_bytes_read;
     uint16_t read_sequence;
+    uint16_t loop;
     uint8_t header_offset;
+    uint8_t bits_remaining;
+    uint8_t checksum_byte_index;
+    mzf_stage_t stage;
+    mzf_normal_step_t step;
 
-    if (!mzf_ultrafast_is_active())
+    if (!mzf_loader_is_active())
     {
         return 0U;
     }
 
     if (mzf_stage == MZF_STAGE_ULTRAFAST)
     {
-        return mzf_ultrafast_get_progress_percent();
+        return mzf_loader_get_progress_percent();
     }
 
     ATOMIC_BLOCK(ATOMIC_RESTORESTATE)
     {
+        stage = mzf_stage;
+        step = mzf_normal_step;
+        loop = mzf_normal_loop;
         header_offset = mzf_header_offset;
         read_sequence = mzf_fifo_read_sequence;
+        bits_remaining = mzf_normal_bits_remaining;
+        checksum_byte_index = mzf_normal_checksum_byte_index;
     }
 
-    total = MZF_HEADER_BYTES + (uint32_t)mzf_ultrafast_get_loader_size();
+    header_units = mzf_progress_stage_total_units(MZF_STAGE_HEADER,
+                                                  MZF_HEADER_BYTES);
+    total = header_units;
+
+    if (mzf_loader_is_ic_turbo())
+    {
+        data_units = mzf_progress_stage_total_units(MZF_STAGE_TAPE_TURBO_DATA,
+                                                    mzf_original_data_length);
+        total += data_units;
+    }
+    else
+    {
+        loader_units = mzf_progress_stage_total_units(
+            MZF_STAGE_DATA, (uint32_t)mzf_loader_get_loader_size());
+        total += loader_units;
+        if (mzf_loader_is_tc_turbo())
+        {
+            data_units = mzf_progress_stage_total_units(
+                MZF_STAGE_TAPE_TURBO_DATA, mzf_original_data_length);
+            total += data_units;
+        }
+    }
+
     if (total == 0UL)
     {
         return 0U;
     }
 
-    if (mzf_stage == MZF_STAGE_HEADER)
+    if (stage == MZF_STAGE_HEADER)
     {
-        done = header_offset;
+        done = mzf_progress_stage_done_units(stage, step, loop,
+                                             (uint32_t)header_offset,
+                                             MZF_HEADER_BYTES,
+                                             bits_remaining,
+                                             checksum_byte_index);
     }
-    else if (mzf_stage == MZF_STAGE_DATA)
+    else if (stage == MZF_STAGE_DATA)
     {
-        done = MZF_HEADER_BYTES + (uint32_t)read_sequence;
+        stage_bytes_read = (uint32_t)read_sequence;
+        done = header_units +
+               mzf_progress_stage_done_units(stage, step, loop,
+                                             stage_bytes_read,
+                                             (uint32_t)mzf_loader_get_loader_size(),
+                                             bits_remaining,
+                                             checksum_byte_index);
     }
-    else if (mzf_stage != MZF_STAGE_NONE)
+    else if (stage == MZF_STAGE_TAPE_TURBO_DATA)
+    {
+        stage_bytes_read = (uint32_t)read_sequence;
+        done = header_units + loader_units +
+               mzf_progress_stage_done_units(stage, step, loop,
+                                             stage_bytes_read,
+                                             mzf_original_data_length,
+                                             bits_remaining,
+                                             checksum_byte_index);
+    }
+    else if (stage != MZF_STAGE_NONE)
     {
         done = total;
     }
@@ -1388,10 +1899,9 @@ uint8_t mzf_playback_get_progress_percent(void)
     percent = (done * 100UL) / total;
     return (percent > 100UL) ? 100U : (uint8_t)percent;
 }
-
 mzf_playback_phase_t mzf_playback_get_progress_phase(void)
 {
-    if (!mzf_ultrafast_is_active())
+    if (!mzf_loader_is_active())
     {
         return MZF_PLAYBACK_PHASE_NORMAL;
     }
@@ -1401,20 +1911,39 @@ mzf_playback_phase_t mzf_playback_get_progress_phase(void)
         return MZF_PLAYBACK_PHASE_ULTRAFAST_DATA;
     }
 
-    switch (mzf_ultrafast_get_variant())
+    if (mzf_stage == MZF_STAGE_TAPE_TURBO_DATA)
     {
-        case MZF_ULTRAFAST_VARIANT_LOW:
+        return mzf_loader_is_tc_turbo() ?
+            MZF_PLAYBACK_PHASE_TC_TURBO_DATA :
+            MZF_PLAYBACK_PHASE_IC_TURBO_DATA;
+    }
+
+    if (mzf_loader_is_ic_turbo())
+    {
+        return MZF_PLAYBACK_PHASE_IC_TURBO_DATA;
+    }
+
+    if (mzf_loader_is_tc_turbo())
+    {
+        return MZF_PLAYBACK_PHASE_TC_TURBO_LOADER;
+    }
+
+    switch (mzf_loader_get_variant())
+    {
+        case MZF_LOADER_VARIANT_LOW:
             return MZF_PLAYBACK_PHASE_ULTRAFAST_LOADER_LOW;
-        case MZF_ULTRAFAST_VARIANT_HIGH:
+        case MZF_LOADER_VARIANT_HIGH:
             return MZF_PLAYBACK_PHASE_ULTRAFAST_LOADER_HIGH;
+        case MZF_LOADER_VARIANT_MZ800_HEADER:
+            return MZF_PLAYBACK_PHASE_ULTRAFAST_HEADER;
         default:
             return MZF_PLAYBACK_PHASE_NORMAL;
     }
 }
 
-bool mzf_playback_is_ultrafast_active(void)
+bool mzf_playback_is_ul_loader_active(void)
 {
-    return mzf_ultrafast_is_active();
+    return mzf_loader_is_ul_active();
 }
 
 /*
@@ -1441,9 +1970,17 @@ bool mzf_playback_timer3_compb_from_isr(void)
     if (mzf_timer_phase_high)
     {
         mzf_timer_phase_high = false;
-        mz_read_set_fast_from_isr(0U);
         low_ticks = mzf_current_low_ticks();
+        mzf_read_wave_set_from_isr(0U);
         mzf_timer_start_resume(low_ticks);
+        return true;
+    }
+
+    if (mzf_timer_phase_low_first)
+    {
+        mzf_timer_phase_low_first = false;
+        mzf_read_wave_set_from_isr(1U);
+        mzf_timer_start_resume(mzf_current_high_ticks());
         return true;
     }
 

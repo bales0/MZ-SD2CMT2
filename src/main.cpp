@@ -147,9 +147,10 @@ static void app_enter_browser(void)
 static void app_enter_play(const char *filename, const char *full_path)
 {
     browser_save_position();
+    browser_clear_status();
     play_controller_start_session(filename, full_path,
                                   menu_get_invert_signal(),
-                                  menu_get_ultrafast_enabled(),
+                                  menu_get_loader_mode(),
                                   menu_get_play_control_mode());
     current_screen = APP_SCREEN_PLAY;
     lcd_clear();

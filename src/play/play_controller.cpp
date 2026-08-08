@@ -10,7 +10,7 @@ static char session_filename[PLAY_CONTROLLER_NAME_MAX];
 static char session_full_path[PLAY_CONTROLLER_PATH_MAX];
 static file_format_t session_format = FILE_FORMAT_UNKNOWN;
 static bool session_invert_signal = false;
-static bool session_ultrafast_enabled = false;
+static loader_mode_t session_loader_mode = LOADER_MODE_OFF;
 static play_control_mode_t session_control_mode = PLAY_CONTROL_MOTOR;
 static play_controller_state_t session_state = PLAY_CONTROLLER_STATE_READY;
 
@@ -45,7 +45,7 @@ static bool play_controller_start_engine(void)
     session_state = PLAY_CONTROLLER_STATE_PLAYING;
     play_controller_clear_pause_reason();
     if ((session_control_mode == PLAY_CONTROL_MOTOR) &&
-        play_engine_is_ultrafast_active())
+        play_engine_is_ul_loader_active())
     {
         motor_control_released = true;
     }
@@ -126,7 +126,7 @@ void play_controller_init(void)
     session_full_path[0] = '\0';
     session_format = FILE_FORMAT_UNKNOWN;
     session_invert_signal = false;
-    session_ultrafast_enabled = false;
+    session_loader_mode = LOADER_MODE_OFF;
     session_control_mode = PLAY_CONTROL_MOTOR;
     session_state = PLAY_CONTROLLER_STATE_READY;
     waiting_for_motor = false;
@@ -138,7 +138,7 @@ void play_controller_init(void)
 void play_controller_start_session(const char *filename,
                                    const char *full_path,
                                    bool invert_signal,
-                                   bool ultrafast_enabled,
+                                   loader_mode_t loader_mode,
                                    play_control_mode_t control_mode)
 {
     if (filename == NULL) session_filename[0] = '\0';
@@ -157,7 +157,7 @@ void play_controller_start_session(const char *filename,
 
     session_format = file_format_detect_from_name(session_filename);
     session_invert_signal = invert_signal;
-    session_ultrafast_enabled = ultrafast_enabled;
+    session_loader_mode = loader_mode;
     session_control_mode = control_mode;
     session_state = PLAY_CONTROLLER_STATE_READY;
     waiting_for_motor = false;
@@ -174,7 +174,7 @@ void play_controller_start_session(const char *filename,
     config.full_path = session_full_path;
     config.format = session_format;
     config.invert_signal = session_invert_signal;
-    config.ultrafast_enabled = session_ultrafast_enabled;
+    config.loader_mode = session_loader_mode;
 
     if (!play_engine_prepare(&config))
     {
@@ -338,7 +338,7 @@ void play_controller_get_view(play_controller_view_t *view)
     view->full_path = session_full_path;
     view->format = session_format;
     view->invert_signal = session_invert_signal;
-    view->ultrafast_enabled = session_ultrafast_enabled;
+    view->loader_mode = session_loader_mode;
     view->control_mode = session_control_mode;
     view->waiting_for_motor = waiting_for_motor;
     view->paused_by_motor = paused_by_motor;
@@ -359,6 +359,6 @@ const char* play_controller_get_filename(void) { return session_filename; }
 const char* play_controller_get_full_path(void) { return session_full_path; }
 file_format_t play_controller_get_format(void) { return session_format; }
 bool play_controller_get_invert_signal(void) { return session_invert_signal; }
-bool play_controller_get_ultrafast_enabled(void) { return session_ultrafast_enabled; }
+loader_mode_t play_controller_get_loader_mode(void) { return session_loader_mode; }
 play_control_mode_t play_controller_get_control_mode(void) { return session_control_mode; }
 play_controller_state_t play_controller_get_state(void) { return session_state; }

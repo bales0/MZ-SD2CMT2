@@ -586,6 +586,12 @@ static void browser_move_down(bool repeated)
     }
 }
 
+void browser_clear_status(void)
+{
+    status_message[0] = '\0';
+    status_message_until_ms = 0U;
+}
+
 static browser_action_t browser_select_current(void)
 {
     if (!sd_ok)

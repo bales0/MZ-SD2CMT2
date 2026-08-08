@@ -22,7 +22,7 @@ typedef struct
     const char *full_path;
     file_format_t format;
     bool invert_signal;
-    bool ultrafast_enabled;
+    loader_mode_t loader_mode;
     play_control_mode_t control_mode;
     bool waiting_for_motor;
 
@@ -50,7 +50,7 @@ void play_controller_init(void);
 void play_controller_start_session(const char *filename,
                                    const char *full_path,
                                    bool invert_signal,
-                                   bool ultrafast_enabled,
+                                   loader_mode_t loader_mode,
                                    play_control_mode_t control_mode);
 void play_controller_toggle_play_pause(void);
 void play_controller_stop(void);
@@ -63,6 +63,6 @@ const char* play_controller_get_filename(void);
 const char* play_controller_get_full_path(void);
 file_format_t play_controller_get_format(void);
 bool play_controller_get_invert_signal(void);
-bool play_controller_get_ultrafast_enabled(void);
+loader_mode_t play_controller_get_loader_mode(void);
 play_control_mode_t play_controller_get_control_mode(void);
 play_controller_state_t play_controller_get_state(void);

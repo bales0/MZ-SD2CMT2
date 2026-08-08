@@ -20,6 +20,10 @@ static const char text_play_percent[] PROGMEM = "%s %03u%%";
 static const char text_play_phase_percent[] PROGMEM = "%s %s %03u%%";
 static const char text_phase_nll[] PROGMEM = "NLL";
 static const char text_phase_nlh[] PROGMEM = "NLH";
+static const char text_phase_ulh[] PROGMEM = "ULH";
+static const char text_phase_icl[] PROGMEM = "ICL";
+static const char text_phase_ic[] PROGMEM = "IC";
+static const char text_phase_tc[] PROGMEM = "TC";
 static const char text_phase_ul[] PROGMEM = "UL";
 
 static void lcd_print_fixed(uint8_t row, const char *text)
@@ -87,6 +91,11 @@ static PGM_P progress_phase_label_P(play_progress_phase_t phase)
     {
         case PLAY_PROGRESS_PHASE_ULTRAFAST_LOADER_LOW: return text_phase_nll;
         case PLAY_PROGRESS_PHASE_ULTRAFAST_LOADER_HIGH: return text_phase_nlh;
+        case PLAY_PROGRESS_PHASE_ULTRAFAST_HEADER: return text_phase_ulh;
+        case PLAY_PROGRESS_PHASE_IC_TURBO_LOADER: return text_phase_icl;
+        case PLAY_PROGRESS_PHASE_IC_TURBO_DATA: return text_phase_ic;
+        case PLAY_PROGRESS_PHASE_TC_TURBO_LOADER: return text_phase_tc;
+        case PLAY_PROGRESS_PHASE_TC_TURBO_DATA: return text_phase_tc;
         case PLAY_PROGRESS_PHASE_ULTRAFAST_DATA: return text_phase_ul;
         default: return NULL;
     }

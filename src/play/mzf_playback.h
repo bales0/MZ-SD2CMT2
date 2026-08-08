@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #include "../formats/file_format.h"
+#include "loader_mode.h"
 
 typedef enum
 {
@@ -23,13 +24,18 @@ typedef enum
     MZF_PLAYBACK_PHASE_NORMAL = 0,
     MZF_PLAYBACK_PHASE_ULTRAFAST_LOADER_LOW,
     MZF_PLAYBACK_PHASE_ULTRAFAST_LOADER_HIGH,
+    MZF_PLAYBACK_PHASE_ULTRAFAST_HEADER,
+    MZF_PLAYBACK_PHASE_IC_TURBO_LOADER,
+    MZF_PLAYBACK_PHASE_IC_TURBO_DATA,
+    MZF_PLAYBACK_PHASE_TC_TURBO_LOADER,
+    MZF_PLAYBACK_PHASE_TC_TURBO_DATA,
     MZF_PLAYBACK_PHASE_ULTRAFAST_DATA
 } mzf_playback_phase_t;
 
 /* Streams MZF/MZT/M12 with native MZ-800 monitor PWM framing only. */
 void mzf_playback_init(void);
 bool mzf_playback_prepare(const char *path, file_format_t format,
-                          bool ultrafast_enabled);
+                          loader_mode_t loader_mode);
 bool mzf_playback_start(void);
 bool mzf_playback_pause(void);
 bool mzf_playback_resume(void);
@@ -41,7 +47,7 @@ const char *mzf_playback_get_error_text(void);
 uint8_t mzf_playback_get_buffer_fill_percent(void);
 uint8_t mzf_playback_get_progress_percent(void);
 mzf_playback_phase_t mzf_playback_get_progress_phase(void);
-bool mzf_playback_is_ultrafast_active(void);
+bool mzf_playback_is_ul_loader_active(void);
 
 /* Nominal monitor PWM duration, excluding MOTOR pause gaps between blocks. */
 uint32_t mzf_playback_get_total_duration_ms(void);

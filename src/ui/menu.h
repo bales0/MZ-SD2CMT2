@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <avr/pgmspace.h>
 #include "../drivers/keypad.h"
+#include "../play/loader_mode.h"
 
 /* MOTOR follows the MZ MOTOR line; MANUAL uses SELECT only. */
 typedef enum
@@ -22,7 +23,7 @@ void menu_init(void);
 menu_action_t menu_handle_event(button_event_t event);
 void menu_render(void);
 bool menu_get_invert_signal(void);
-bool menu_get_ultrafast_enabled(void);
+loader_mode_t menu_get_loader_mode(void);
 play_control_mode_t menu_get_play_control_mode(void);
 PGM_P play_control_mode_label_P(play_control_mode_t mode);
 
