@@ -1844,7 +1844,7 @@ uint8_t mzf_playback_get_progress_percent(void)
                                                     mzf_original_data_length);
         total += data_units;
     }
-    else
+    else if (!mzf_loader_is_header_only())
     {
         loader_units = mzf_progress_stage_total_units(
             MZF_STAGE_DATA, (uint32_t)mzf_loader_get_loader_size());

@@ -33,12 +33,20 @@
 #define MZF_LOADER_TC_WORKSPACE_OFFSET 0x4DU
 #define MZF_LOADER_TC_HEADER_TAG_OFFSET 0x18U
 #define MZF_LOADER_PREFIX_BYTES 10U
+#define MZF_LOADER_MZ800_PREFIX_BYTES 6U
+#define MZF_LOADER_MZ800_EXEC_TRAMPOLINE_TEST 0U
+#define MZF_LOADER_MZ800_EXEC_TRAMPOLINE_ADDR 0x10F1U
+#define MZF_LOADER_NAME_OFFSET 0x01U
+#define MZF_LOADER_NAME_BYTES 17U
 #define MZF_LOADER_HIGH_STACK_SAVE_BYTES 4U
 #define MZF_LOADER_HIGH_STACK_SET_BYTES 3U
 #define MZF_LOADER_HIGH_STACK_RESTORE_BYTES 4U
 #define MZF_LOADER_HIGH_SAVED_SP_BYTES 2U
 #define MZF_LOADER_HIGH_STACK_BYTES 16U
-#define MZF_LOADER_MZ800_INITIAL_TIMEOUT_US 2000000UL
+#define MZF_LOADER_START_DELAY_MS 100UL
+#define MZF_LOADER_MZ800_START_DELAY_MS 1000UL
+#define MZF_LOADER_MZ800_READY_DELAY_US 1000U
+#define MZF_LOADER_MZ800_INITIAL_TIMEOUT_US 5000000UL
 #define MZF_LOADER_TIMEOUT_US 500000UL
 
 static bool is_supported_file_type(uint8_t type)
@@ -48,9 +56,32 @@ static bool is_supported_file_type(uint8_t type)
 static const uint8_t mz800_header_prolog_P[] PROGMEM =
 {
     0x3E, 0x08,             /* ld a,8 */
-    0xD3, 0xCE              /* out (0CEh),a */
+    0xD3, 0xCE,             /* out (0CEh),a */
+    0xCD, 0x3E, 0x07,       /* call 073Eh */
+    0x36, 0x01,             /* ld (hl),1 */
+    0x97,                   /* sub a */
+    0x57,                   /* ld d,a */
+    0x5F,                   /* ld e,a */
+    0xCD, 0x08, 0x03,       /* call 0308h */
+    0xCD, 0xBE, 0x02,       /* call 02BEh */
+    0xD3, 0xE2,             /* out (0E2h),a */
+    0x1A,                   /* ld a,(de) */
+    0xD3, 0xE0,             /* out (0E0h),a */
+    0x12,                   /* ld (de),a */
+    0x13,                   /* inc de */
+    0xCB, 0x62,             /* bit 4,d */
+    0x28, 0xF5              /* jr z,self-copy */
 };
 
+static const uint8_t mz800_exec_trampoline_P[MZF_LOADER_NAME_BYTES] PROGMEM =
+{
+    0x2A, 0x0A, 0x11,       /* ld hl,(110Ah) */
+    0x22, 0x02, 0x11,       /* ld (1102h),hl */
+    0xCD, 0xF8, 0x04,       /* call 04F8h */
+    0xD3, 0xE2,             /* out (0E2h),a */
+    0x21, 0x0A, 0x11,       /* ld hl,110Ah */
+    0xC3, 0x08, 0xED        /* jp 0ED08h */
+};
 static const uint8_t mz800_high_low_ram_map_P[] PROGMEM =
 {
     0x3E, 0x08,             /* ld a,8 */
@@ -138,6 +169,46 @@ static const uint8_t loader_body_P[] PROGMEM =
     0x00,                   /* nop; keep interrupts disabled for entry */
     0xE1,                   /* pop hl */
     0xE9                    /* jp (hl) */
+};
+
+static const uint8_t loader_body_mz800_header_P[] PROGMEM =
+{
+    0x11, 0x02, 0xE0,       /* ld de,0xE002 */
+    0xF3,                   /* di */
+    0x1A,                   /* l0: ld a,(de) */
+    0xE6, 0x20,             /* and 0x20 */
+    0x28, 0xFB,             /* jr z,l0 */
+    0x3E, 0x03,             /* ld a,3 */
+    0x32, 0x03, 0xE0,       /* ld (0E003h),a */
+    0xC5,                   /* l1: push bc */
+    0x01, 0x00, 0x04,       /* ld bc,0x0400 */
+    0x1A,                   /* l2: ld a,(de) */
+    0xCB, 0x67,             /* bit 4,a */
+    0x28, 0xFB,             /* jr z,l2 */
+    0xE6, 0x20,             /* and 0x20 */
+    0xB1,                   /* or c */
+    0x07,                   /* rlca */
+    0x4F,                   /* ld c,a */
+    0x3E, 0x02,             /* ld a,2 */
+    0x32, 0x03, 0xE0,       /* ld (0E003h),a */
+    0x1A,                   /* l3: ld a,(de) */
+    0xCB, 0x67,             /* bit 4,a */
+    0x20, 0xFB,             /* jr nz,l3 */
+    0xE6, 0x20,             /* and 0x20 */
+    0xB1,                   /* or c */
+    0x07,                   /* rlca */
+    0x4F,                   /* ld c,a */
+    0x3E, 0x03,             /* ld a,3 */
+    0x32, 0x03, 0xE0,       /* ld (0E003h),a */
+    0x10, 0xE0,             /* djnz l2 */
+    0x71,                   /* ld (hl),c */
+    0xC1,                   /* pop bc */
+    0x0B,                   /* dec bc */
+    0x23,                   /* inc hl */
+    0x79,                   /* ld a,c */
+    0xB0,                   /* or b */
+    0x20, 0xD4,             /* jr nz,l1 */
+    0xC3                    /* jp exec */
 };
 
 typedef struct
@@ -253,13 +324,15 @@ static uint16_t loader_size(loader_mode_t mode)
     {
         return MZF_LOADER_TC_LOADER_SIZE;
     }
+    if (mode == LOADER_MODE_UL_MZ800)
+    {
+        return (uint16_t)(sizeof(mz800_header_prolog_P) +
+                          MZF_LOADER_MZ800_PREFIX_BYTES +
+                          sizeof(loader_body_mz800_header_P) + 2U);
+    }
 
     size = (uint16_t)(MZF_LOADER_PREFIX_BYTES +
                       sizeof(loader_body_P));
-    if (mode == LOADER_MODE_UL_MZ800)
-    {
-        size = (uint16_t)(size + sizeof(mz800_header_prolog_P));
-    }
     return size;
 }
 
@@ -557,6 +630,16 @@ void mzf_loader_patch_loader_header(uint8_t *header)
             (uint8_t)(context.data_length >> 8U);
         memcpy(header + MZF_LOADER_METADATA_OFFSET + 2U,
                context.workspace_restore, 6U);
+#if MZF_LOADER_MZ800_EXEC_TRAMPOLINE_TEST
+        if (context.variant == MZF_LOADER_VARIANT_MZ800_HEADER)
+        {
+            for (uint8_t i = 0U; i < MZF_LOADER_NAME_BYTES; ++i)
+            {
+                header[MZF_LOADER_NAME_OFFSET + i] =
+                    (uint8_t)pgm_read_byte(mz800_exec_trampoline_P + i);
+            }
+        }
+#endif
         (void)mzf_loader_build_loader(header + MZF_LOADER_MZ800_HEADER_OFFSET,
                                          MZF_LOADER_MZ800_HEADER_CAPACITY);
         return;
@@ -640,8 +723,30 @@ uint16_t mzf_loader_build_loader(uint8_t *destination, uint16_t capacity)
     {
         for (uint8_t i = 0U; i < sizeof(mz800_header_prolog_P); ++i)
         {
-            destination[offset++] = (uint8_t)pgm_read_byte(mz800_header_prolog_P + i);
+            destination[offset++] =
+                (uint8_t)pgm_read_byte(mz800_header_prolog_P + i);
         }
+
+        destination[offset++] = 0x01U;
+        write_le16(destination + offset, context.data_length);
+        offset = (uint16_t)(offset + 2U);
+
+        destination[offset++] = 0x21U;
+        write_le16(destination + offset, context.data_load_address);
+        offset = (uint16_t)(offset + 2U);
+
+        for (uint16_t i = 0U; i < sizeof(loader_body_mz800_header_P); ++i)
+        {
+            destination[offset++] =
+                (uint8_t)pgm_read_byte(loader_body_mz800_header_P + i);
+        }
+#if MZF_LOADER_MZ800_EXEC_TRAMPOLINE_TEST
+        write_le16(destination + offset, MZF_LOADER_MZ800_EXEC_TRAMPOLINE_ADDR);
+#else
+        write_le16(destination + offset, context.exec_address);
+#endif
+        offset = (uint16_t)(offset + 2U);
+        return offset;
     }
     destination[offset++] = 0x01U;
     write_le16(destination + offset, context.data_length);
@@ -677,7 +782,6 @@ uint16_t mzf_loader_build_loader(uint8_t *destination, uint16_t capacity)
             destination[offset++] = (uint8_t)pgm_read_byte(loader_body_P + i);
         }
     }
-
     return offset;
 }
 
@@ -706,8 +810,18 @@ bool mzf_loader_begin(void)
     context.started = true;
 
     mz_sense_set_fast(true);
-    mz_read_set_fast(true);
-    delay(100U);
+    if (context.variant == MZF_LOADER_VARIANT_MZ800_HEADER)
+    {
+        mz_read_set_fast(false);
+        delay(MZF_LOADER_MZ800_START_DELAY_MS);
+        mz_read_set_fast(true);
+        delayMicroseconds(MZF_LOADER_MZ800_READY_DELAY_US);
+    }
+    else
+    {
+        mz_read_set_fast(true);
+        delay(MZF_LOADER_START_DELAY_MS);
+    }
     return true;
 }
 
