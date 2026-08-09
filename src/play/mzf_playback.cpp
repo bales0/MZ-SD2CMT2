@@ -1343,7 +1343,7 @@ static void mzf_service_boundary_auto_continue(void)
     {
         if (!mzf_start_ultrafast_output() && (mzf_state == MZF_PLAYBACK_RUNNING))
         {
-            mzf_set_error_P(PSTR("UF START"), MZF_PLAYBACK_BAD_FILE);
+            mzf_set_error_P(PSTR("UL START"), MZF_PLAYBACK_BAD_FILE);
         }
         return;
     }

@@ -33,6 +33,11 @@
 #define MZF_LOADER_TC_WORKSPACE_OFFSET 0x4DU
 #define MZF_LOADER_TC_HEADER_TAG_OFFSET 0x18U
 #define MZF_LOADER_PREFIX_BYTES 10U
+#define MZF_LOADER_HIGH_STACK_SAVE_BYTES 4U
+#define MZF_LOADER_HIGH_STACK_SET_BYTES 3U
+#define MZF_LOADER_HIGH_STACK_RESTORE_BYTES 4U
+#define MZF_LOADER_HIGH_SAVED_SP_BYTES 2U
+#define MZF_LOADER_HIGH_STACK_BYTES 16U
 #define MZF_LOADER_MZ800_INITIAL_TIMEOUT_US 2000000UL
 #define MZF_LOADER_TIMEOUT_US 500000UL
 
@@ -44,6 +49,12 @@ static const uint8_t mz800_header_prolog_P[] PROGMEM =
 {
     0x3E, 0x08,             /* ld a,8 */
     0xD3, 0xCE              /* out (0CEh),a */
+};
+
+static const uint8_t mz800_high_low_ram_map_P[] PROGMEM =
+{
+    0x3E, 0x08,             /* ld a,8 */
+    0xD3, 0xE0              /* out (0E0h),a */
 };
 static const uint8_t ic_header_loader_P[MZF_LOADER_MZ800_HEADER_CAPACITY] PROGMEM =
 {
@@ -124,7 +135,7 @@ static const uint8_t loader_body_P[] PROGMEM =
     0x79,                   /* ld a,c */
     0xB0,                   /* or b */
     0x20, 0xD6,             /* jr nz,l1 */
-    0xFB,                   /* ei */
+    0x00,                   /* nop; keep interrupts disabled for entry */
     0xE1,                   /* pop hl */
     0xE9                    /* jp (hl) */
 };
@@ -252,6 +263,25 @@ static uint16_t loader_size(loader_mode_t mode)
     return size;
 }
 
+static uint16_t loader_code_size(mzf_loader_variant_t variant, uint16_t size)
+{
+    return (variant == MZF_LOADER_VARIANT_HIGH) ?
+        (uint16_t)(size + sizeof(mz800_high_low_ram_map_P) +
+                   MZF_LOADER_HIGH_STACK_SAVE_BYTES +
+                   MZF_LOADER_HIGH_STACK_SET_BYTES +
+                   MZF_LOADER_HIGH_STACK_RESTORE_BYTES) :
+        size;
+}
+
+static uint16_t loader_footprint(mzf_loader_variant_t variant, uint16_t size)
+{
+    return (variant == MZF_LOADER_VARIANT_HIGH) ?
+        (uint16_t)(loader_code_size(variant, size) +
+                   MZF_LOADER_HIGH_SAVED_SP_BYTES +
+                   MZF_LOADER_HIGH_STACK_BYTES) :
+        size;
+}
+
 static bool ranges_overlap(uint32_t left_start, uint32_t left_length,
                            uint32_t right_start, uint32_t right_length)
 {
@@ -266,7 +296,9 @@ static bool select_loader(uint32_t data_start, uint32_t data_length,
                           mzf_loader_variant_t *variant,
                           uint16_t *address)
 {
-    if (!ranges_overlap(MZF_LOADER_LOW_LOAD_ADDR, size,
+    uint16_t footprint = loader_footprint(MZF_LOADER_VARIANT_LOW, size);
+
+    if (!ranges_overlap(MZF_LOADER_LOW_LOAD_ADDR, footprint,
                         data_start, data_length))
     {
         *variant = MZF_LOADER_VARIANT_LOW;
@@ -274,7 +306,8 @@ static bool select_loader(uint32_t data_start, uint32_t data_length,
         return true;
     }
 
-    if (!ranges_overlap(MZF_LOADER_HIGH_LOAD_ADDR, size,
+    footprint = loader_footprint(MZF_LOADER_VARIANT_HIGH, size);
+    if (!ranges_overlap(MZF_LOADER_HIGH_LOAD_ADDR, footprint,
                         data_start, data_length))
     {
         *variant = MZF_LOADER_VARIANT_HIGH;
@@ -312,7 +345,8 @@ static bool wait_write_level(uint8_t expected)
     uint32_t start = micros();
     uint32_t timeout = MZF_LOADER_TIMEOUT_US;
 
-    if ((context.variant == MZF_LOADER_VARIANT_MZ800_HEADER) &&
+    if (((context.variant == MZF_LOADER_VARIANT_MZ800_HEADER) ||
+         (context.variant == MZF_LOADER_VARIANT_HIGH)) &&
         !context.initial_wait_used)
     {
         timeout = MZF_LOADER_MZ800_INITIAL_TIMEOUT_US;
@@ -322,12 +356,13 @@ static bool wait_write_level(uint8_t expected)
     {
         if ((uint32_t)(micros() - start) > timeout)
         {
-            set_error_P(PSTR("UF WAIT"));
+            set_error_P(PSTR("UL WAIT"));
             return false;
         }
     }
 
-    if (context.variant == MZF_LOADER_VARIANT_MZ800_HEADER)
+    if ((context.variant == MZF_LOADER_VARIANT_MZ800_HEADER) ||
+        (context.variant == MZF_LOADER_VARIANT_HIGH))
     {
         context.initial_wait_used = true;
     }
@@ -451,7 +486,7 @@ bool mzf_loader_prepare(file_format_t format,
         return false;
     }
 
-    context.loader_size = size;
+    context.loader_size = loader_code_size(context.variant, size);
     context.active = true;
     return true;
 }
@@ -548,6 +583,7 @@ void mzf_loader_patch_loader_header(uint8_t *header)
 uint16_t mzf_loader_build_loader(uint8_t *destination, uint16_t capacity)
 {
     uint16_t offset = 0U;
+    uint16_t high_saved_sp_address = 0U;
 
     if ((destination == NULL) || !context.active ||
         (capacity < context.loader_size))
@@ -575,14 +611,38 @@ uint16_t mzf_loader_build_loader(uint8_t *destination, uint16_t capacity)
         return MZF_LOADER_TC_LOADER_SIZE;
     }
 
-    if (context.variant == MZF_LOADER_VARIANT_MZ800_HEADER)
+    if (context.variant == MZF_LOADER_VARIANT_HIGH)
+    {
+        high_saved_sp_address =
+            (uint16_t)(context.loader_address + context.loader_size);
+
+        destination[offset++] = 0xEDU;
+        destination[offset++] = 0x73U;
+        write_le16(destination + offset, high_saved_sp_address);
+        offset = (uint16_t)(offset + 2U);
+
+        destination[offset++] = 0x31U;
+        write_le16(destination + offset,
+                   (uint16_t)(high_saved_sp_address +
+                              MZF_LOADER_HIGH_SAVED_SP_BYTES +
+                              MZF_LOADER_HIGH_STACK_BYTES));
+        offset = (uint16_t)(offset + 2U);
+    }
+
+    if (context.variant == MZF_LOADER_VARIANT_HIGH)
+    {
+        for (uint8_t i = 0U; i < sizeof(mz800_high_low_ram_map_P); ++i)
+        {
+            destination[offset++] = (uint8_t)pgm_read_byte(mz800_high_low_ram_map_P + i);
+        }
+    }
+    else if (context.variant == MZF_LOADER_VARIANT_MZ800_HEADER)
     {
         for (uint8_t i = 0U; i < sizeof(mz800_header_prolog_P); ++i)
         {
             destination[offset++] = (uint8_t)pgm_read_byte(mz800_header_prolog_P + i);
         }
     }
-
     destination[offset++] = 0x01U;
     write_le16(destination + offset, context.data_length);
     offset = (uint16_t)(offset + 2U);
@@ -597,9 +657,25 @@ uint16_t mzf_loader_build_loader(uint8_t *destination, uint16_t capacity)
 
     destination[offset++] = 0xD5U;
 
-    for (uint16_t i = 0U; i < sizeof(loader_body_P); ++i)
+    if (context.variant == MZF_LOADER_VARIANT_HIGH)
     {
-        destination[offset++] = (uint8_t)pgm_read_byte(loader_body_P + i);
+        for (uint16_t i = 0U; i < (uint16_t)(sizeof(loader_body_P) - 1U); ++i)
+        {
+            destination[offset++] = (uint8_t)pgm_read_byte(loader_body_P + i);
+        }
+
+        destination[offset++] = 0xEDU;
+        destination[offset++] = 0x7BU;
+        write_le16(destination + offset, high_saved_sp_address);
+        offset = (uint16_t)(offset + 2U);
+        destination[offset++] = 0xE9U;
+    }
+    else
+    {
+        for (uint16_t i = 0U; i < sizeof(loader_body_P); ++i)
+        {
+            destination[offset++] = (uint8_t)pgm_read_byte(loader_body_P + i);
+        }
     }
 
     return offset;
@@ -609,7 +685,7 @@ bool mzf_loader_begin(void)
 {
     if (!context.active)
     {
-        set_error_P(PSTR("UF ARG"));
+        set_error_P(PSTR("UL ARG"));
         return false;
     }
 
@@ -620,7 +696,7 @@ bool mzf_loader_begin(void)
 
     if (!sdcard_file_seek(context.data_offset))
     {
-        set_error_P(PSTR("UF SEEK"));
+        set_error_P(PSTR("UL SEEK"));
         return false;
     }
 
@@ -643,7 +719,7 @@ bool mzf_loader_pump(uint8_t max_bytes)
 
     if (!context.active || !context.started)
     {
-        set_error_P(PSTR("UF ARG"));
+        set_error_P(PSTR("UL ARG"));
         return false;
     }
 
@@ -668,7 +744,7 @@ bool mzf_loader_pump(uint8_t max_bytes)
     received = sdcard_file_read(work, request);
     if (received != (int16_t)request)
     {
-        set_error_P((received < 0) ? PSTR("UF READ") : PSTR("UF SHORT"));
+        set_error_P((received < 0) ? PSTR("UL READ") : PSTR("UL SHORT"));
         return false;
     }
 
