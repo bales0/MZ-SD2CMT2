@@ -4,6 +4,7 @@
 #include "../drivers/lcd.h"
 #include "../drivers/flash_text.h"
 #include "../formats/file_format.h"
+#include "../play/mzf_loader.h"
 
 static const char text_play[] PROGMEM = "PLAY";
 static const char text_no_session[] PROGMEM = "NO SESSION";
@@ -20,7 +21,8 @@ static const char text_play_percent[] PROGMEM = "%s %03u%%";
 static const char text_play_phase_percent[] PROGMEM = "%s %s %03u%%";
 static const char text_phase_nll[] PROGMEM = "NLL";
 static const char text_phase_nlh[] PROGMEM = "NLH";
-static const char text_phase_ulh[] PROGMEM = "ULH";
+static const char text_phase_hll[] PROGMEM = "HLL";
+static const char text_phase_hlh[] PROGMEM = "HLH";
 static const char text_phase_icl[] PROGMEM = "ICL";
 static const char text_phase_ic[] PROGMEM = "IC";
 static const char text_phase_tc[] PROGMEM = "TC";
@@ -91,7 +93,9 @@ static PGM_P progress_phase_label_P(play_progress_phase_t phase)
     {
         case PLAY_PROGRESS_PHASE_ULTRAFAST_LOADER_LOW: return text_phase_nll;
         case PLAY_PROGRESS_PHASE_ULTRAFAST_LOADER_HIGH: return text_phase_nlh;
-        case PLAY_PROGRESS_PHASE_ULTRAFAST_HEADER: return text_phase_ulh;
+        case PLAY_PROGRESS_PHASE_ULTRAFAST_HEADER:
+            return mzf_loader_is_mz800_header_high() ? text_phase_hlh :
+                                                       text_phase_hll;
         case PLAY_PROGRESS_PHASE_IC_TURBO_LOADER: return text_phase_icl;
         case PLAY_PROGRESS_PHASE_IC_TURBO_DATA: return text_phase_ic;
         case PLAY_PROGRESS_PHASE_TC_TURBO_LOADER: return text_phase_tc;

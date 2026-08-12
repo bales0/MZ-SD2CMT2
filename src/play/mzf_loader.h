@@ -48,6 +48,7 @@ bool mzf_loader_prepare(file_format_t format,
 bool mzf_loader_is_active(void);
 bool mzf_loader_is_ul_active(void);
 bool mzf_loader_is_header_only(void);
+bool mzf_loader_is_mz800_header_high(void);
 bool mzf_loader_is_ic_turbo(void);
 bool mzf_loader_is_tc_turbo(void);
 bool mzf_loader_is_tape_turbo(void);

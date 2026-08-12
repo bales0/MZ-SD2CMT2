@@ -34,10 +34,7 @@
 #define MZF_LOADER_TC_HEADER_TAG_OFFSET 0x18U
 #define MZF_LOADER_PREFIX_BYTES 10U
 #define MZF_LOADER_MZ800_PREFIX_BYTES 6U
-#define MZF_LOADER_MZ800_EXEC_TRAMPOLINE_TEST 0U
-#define MZF_LOADER_MZ800_EXEC_TRAMPOLINE_ADDR 0x10F1U
-#define MZF_LOADER_NAME_OFFSET 0x01U
-#define MZF_LOADER_NAME_BYTES 17U
+#define MZF_LOADER_MZ800_RELOCATOR_BYTES 14U
 #define MZF_LOADER_HIGH_STACK_SAVE_BYTES 4U
 #define MZF_LOADER_HIGH_STACK_SET_BYTES 3U
 #define MZF_LOADER_HIGH_STACK_RESTORE_BYTES 4U
@@ -53,6 +50,7 @@ static bool is_supported_file_type(uint8_t type)
 {
     return (type == 0x01U) || (type == 0x76U);
 }
+
 static const uint8_t mz800_header_prolog_P[] PROGMEM =
 {
     0x3E, 0x08,             /* ld a,8 */
@@ -73,20 +71,12 @@ static const uint8_t mz800_header_prolog_P[] PROGMEM =
     0x28, 0xF5              /* jr z,self-copy */
 };
 
-static const uint8_t mz800_exec_trampoline_P[MZF_LOADER_NAME_BYTES] PROGMEM =
-{
-    0x2A, 0x0A, 0x11,       /* ld hl,(110Ah) */
-    0x22, 0x02, 0x11,       /* ld (1102h),hl */
-    0xCD, 0xF8, 0x04,       /* call 04F8h */
-    0xD3, 0xE2,             /* out (0E2h),a */
-    0x21, 0x0A, 0x11,       /* ld hl,110Ah */
-    0xC3, 0x08, 0xED        /* jp 0ED08h */
-};
 static const uint8_t mz800_high_low_ram_map_P[] PROGMEM =
 {
     0x3E, 0x08,             /* ld a,8 */
     0xD3, 0xE0              /* out (0E0h),a */
 };
+
 static const uint8_t ic_header_loader_P[MZF_LOADER_MZ800_HEADER_CAPACITY] PROGMEM =
 {
     0x3E, 0x08, 0xD3, 0xCE, 0xCD, 0x3E, 0x07, 0x36,
@@ -118,6 +108,7 @@ static const uint8_t tc_loader_template_P[MZF_LOADER_TC_LOADER_SIZE] PROGMEM =
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00
 };
+
 static const uint8_t tc_header_tag_P[8] PROGMEM =
 {
     0x5B, 0x96, 0xA5, 0x9D, 0x9A, 0xB7, 0x5D, 0x00
@@ -171,6 +162,12 @@ static const uint8_t loader_body_P[] PROGMEM =
     0xE9                    /* jp (hl) */
 };
 
+/*
+   Compact receiver used by the MZ-800 header-only UL.
+   Its final byte is JP nn opcode (C3).  In the relocated HIGH version
+   the builder copies only sizeof(...)-1 bytes, restores SP, and emits
+   its own JP <real EXEC>.
+*/
 static const uint8_t loader_body_mz800_header_P[] PROGMEM =
 {
     0x11, 0x02, 0xE0,       /* ld de,0xE002 */
@@ -208,8 +205,21 @@ static const uint8_t loader_body_mz800_header_P[] PROGMEM =
     0x79,                   /* ld a,c */
     0xB0,                   /* or b */
     0x20, 0xD4,             /* jr nz,l1 */
-    0xC3                    /* jp exec */
+    0xC3                    /* jp exec - opcode is replaced by HIGH epilogue */
 };
+
+static const uint8_t loader_body_mz800_header_high_exx_P[] PROGMEM =
+{
+    0x11U, 0x02U, 0xE0U, 0xF3U, 0x1AU, 0xE6U, 0x20U, 0x28U,
+    0xFBU, 0x3EU, 0x03U, 0x32U, 0x03U, 0xE0U, 0x01U, 0x00U,
+    0x04U, 0x1AU, 0xCBU, 0x67U, 0x28U, 0xFBU, 0xE6U, 0x20U,
+    0xB1U, 0x07U, 0x4FU, 0x3EU, 0x02U, 0x32U, 0x03U, 0xE0U,
+    0x1AU, 0xCBU, 0x67U, 0x20U, 0xFBU, 0xE6U, 0x20U, 0xB1U,
+    0x07U, 0x4FU, 0x3EU, 0x03U, 0x32U, 0x03U, 0xE0U, 0x10U,
+    0xE0U, 0x71U, 0x23U, 0xD9U, 0x0BU, 0x79U, 0xB0U, 0xD9U,
+    0x20U, 0xD4U, 0xC3U
+};
+
 
 typedef struct
 {
@@ -217,6 +227,7 @@ typedef struct
     bool started;
     bool finished;
     bool initial_wait_used;
+    bool mz800_header_high;
     mzf_loader_variant_t variant;
     uint16_t loader_address;
     uint16_t loader_size;
@@ -312,6 +323,44 @@ static void patch_tc_workspace_restore(uint8_t *destination)
            MZF_LOADER_WORKSPACE_RESTORE_BYTES - 6U);
 }
 
+static uint16_t mz800_header_low_size(void)
+{
+    /* Exact working master LOW header-only loader: 29 + 6 + 59 + 2 = 96 B. */
+    return (uint16_t)(sizeof(mz800_header_prolog_P) +
+                      MZF_LOADER_MZ800_PREFIX_BYTES +
+                      sizeof(loader_body_mz800_header_P) + 2U);
+}
+
+static uint16_t mz800_header_high_stage2_size(void)
+{
+    /*
+       MZ800 header-only HIGH stage 2:
+         verified MZ800/monitor init          10
+         map low RAM                           4
+         LD BC,size + EXX (count -> BC')       4
+         LD HL,load                            3
+         stack-free EXX receiver, no final JP 58
+         JP real EXEC                         3
+       Total: 82 bytes.
+
+       The 14-byte relocator plus this stage fills the complete 96-byte
+       executable area of the 128-byte fake header.
+    */
+    return 82U;
+}
+
+static uint16_t mz800_header_high_size(void)
+{
+    return (uint16_t)(MZF_LOADER_MZ800_RELOCATOR_BYTES +
+                      mz800_header_high_stage2_size());
+}
+
+static uint16_t mz800_header_high_runtime_footprint(void)
+{
+    /* The stack-free HIGH receiver needs no storage beyond stage 2. */
+    return mz800_header_high_stage2_size();
+}
+
 static uint16_t loader_size(loader_mode_t mode)
 {
     uint16_t size;
@@ -326,9 +375,7 @@ static uint16_t loader_size(loader_mode_t mode)
     }
     if (mode == LOADER_MODE_UL_MZ800)
     {
-        return (uint16_t)(sizeof(mz800_header_prolog_P) +
-                          MZF_LOADER_MZ800_PREFIX_BYTES +
-                          sizeof(loader_body_mz800_header_P) + 2U);
+        return MZF_LOADER_MZ800_HEADER_CAPACITY;
     }
 
     size = (uint16_t)(MZF_LOADER_PREFIX_BYTES +
@@ -523,14 +570,43 @@ bool mzf_loader_prepare(file_format_t format,
     }
     if (mode == LOADER_MODE_UL_MZ800)
     {
-        if ((size > MZF_LOADER_MZ800_HEADER_CAPACITY) ||
-            ranges_overlap(MZF_LOADER_MZ800_HEADER_ADDR, size,
-                           context.data_load_address, context.data_length))
+        /*
+           MZ800 HEADER ONLY AUTO LOW/HIGH:
+
+           LOW is the exact already-working master implementation at $1110.
+           Use it whenever the payload does not overwrite its 96-byte code.
+
+           HIGH is selected only when LOW would overlap the payload.
+           The 14-byte stage-1 code still starts at $1110, but it relocates
+           stage 2 to $C000 before the payload transfer starts.
+        */
+        const uint16_t low_size = mz800_header_low_size();
+
+        if (!ranges_overlap(MZF_LOADER_MZ800_HEADER_ADDR, low_size,
+                            context.data_load_address, context.data_length))
+        {
+            context.variant = MZF_LOADER_VARIANT_MZ800_HEADER;
+            context.mz800_header_high = false;
+            context.loader_address = MZF_LOADER_MZ800_HEADER_ADDR;
+            context.loader_size = low_size;
+        }
+        else if (!ranges_overlap(MZF_LOADER_HIGH_LOAD_ADDR,
+                                 mz800_header_high_runtime_footprint(),
+                                 context.data_load_address,
+                                 context.data_length))
+        {
+            context.variant = MZF_LOADER_VARIANT_MZ800_HEADER;
+            context.mz800_header_high = true;
+            context.loader_address = MZF_LOADER_MZ800_HEADER_ADDR;
+            context.loader_size = mz800_header_high_size();
+        }
+        else
         {
             return false;
         }
-        context.variant = MZF_LOADER_VARIANT_MZ800_HEADER;
-        context.loader_address = MZF_LOADER_MZ800_HEADER_ADDR;
+
+        context.active = true;
+        return true;
     }
     else if (is_ic_mode(mode))
     {
@@ -581,6 +657,13 @@ bool mzf_loader_is_header_only(void)
            (context.variant == MZF_LOADER_VARIANT_MZ800_HEADER);
 }
 
+bool mzf_loader_is_mz800_header_high(void)
+{
+    return context.active &&
+           (context.variant == MZF_LOADER_VARIANT_MZ800_HEADER) &&
+           context.mz800_header_high;
+}
+
 bool mzf_loader_is_ic_turbo(void)
 {
     return context.active && is_ic_variant(context.variant);
@@ -617,6 +700,13 @@ void mzf_loader_patch_loader_header(uint8_t *header)
     if ((context.variant == MZF_LOADER_VARIANT_MZ800_HEADER) ||
         is_ic_variant(context.variant))
     {
+        /*
+           SIZE=$0000 is intentional.  On the MZ800 monitor path used here
+           it is not treated as an empty payload: the 16-bit relocation
+           count wraps and executes the known 65536-byte self-copy before
+           control reaches EXEC=$1110.  LOAD=$1200 must therefore remain
+           paired with this fake-header scheme.
+        */
         header[MZF_HEADER_FILE_TYPE_OFFSET] = MZF_LOADER_MZ800_HEADER_TYPE;
         write_le16(header + MZF_HEADER_DATA_LENGTH_OFFSET, 0U);
         write_le16(header + MZF_HEADER_LOAD_ADDRESS_OFFSET,
@@ -630,18 +720,8 @@ void mzf_loader_patch_loader_header(uint8_t *header)
             (uint8_t)(context.data_length >> 8U);
         memcpy(header + MZF_LOADER_METADATA_OFFSET + 2U,
                context.workspace_restore, 6U);
-#if MZF_LOADER_MZ800_EXEC_TRAMPOLINE_TEST
-        if (context.variant == MZF_LOADER_VARIANT_MZ800_HEADER)
-        {
-            for (uint8_t i = 0U; i < MZF_LOADER_NAME_BYTES; ++i)
-            {
-                header[MZF_LOADER_NAME_OFFSET + i] =
-                    (uint8_t)pgm_read_byte(mz800_exec_trampoline_P + i);
-            }
-        }
-#endif
         (void)mzf_loader_build_loader(header + MZF_LOADER_MZ800_HEADER_OFFSET,
-                                         MZF_LOADER_MZ800_HEADER_CAPACITY);
+                                     MZF_LOADER_MZ800_HEADER_CAPACITY);
         return;
     }
 
@@ -716,22 +796,28 @@ uint16_t mzf_loader_build_loader(uint8_t *destination, uint16_t capacity)
     {
         for (uint8_t i = 0U; i < sizeof(mz800_high_low_ram_map_P); ++i)
         {
-            destination[offset++] = (uint8_t)pgm_read_byte(mz800_high_low_ram_map_P + i);
+            destination[offset++] =
+                (uint8_t)pgm_read_byte(mz800_high_low_ram_map_P + i);
         }
     }
-    else if (context.variant == MZF_LOADER_VARIANT_MZ800_HEADER)
+    else if ((context.variant == MZF_LOADER_VARIANT_MZ800_HEADER) &&
+             !context.mz800_header_high)
     {
+        /*
+           EXACT working LOW header-only loader from GitHub master.
+           This byte-generation path is intentionally untouched.
+        */
         for (uint8_t i = 0U; i < sizeof(mz800_header_prolog_P); ++i)
         {
             destination[offset++] =
                 (uint8_t)pgm_read_byte(mz800_header_prolog_P + i);
         }
 
-        destination[offset++] = 0x01U;
+        destination[offset++] = 0x01U;       /* ld bc,payload size */
         write_le16(destination + offset, context.data_length);
         offset = (uint16_t)(offset + 2U);
 
-        destination[offset++] = 0x21U;
+        destination[offset++] = 0x21U;       /* ld hl,payload load */
         write_le16(destination + offset, context.data_load_address);
         offset = (uint16_t)(offset + 2U);
 
@@ -740,12 +826,111 @@ uint16_t mzf_loader_build_loader(uint8_t *destination, uint16_t capacity)
             destination[offset++] =
                 (uint8_t)pgm_read_byte(loader_body_mz800_header_P + i);
         }
-#if MZF_LOADER_MZ800_EXEC_TRAMPOLINE_TEST
-        write_le16(destination + offset, MZF_LOADER_MZ800_EXEC_TRAMPOLINE_ADDR);
-#else
+
         write_le16(destination + offset, context.exec_address);
-#endif
         offset = (uint16_t)(offset + 2U);
+        return offset;
+    }
+    else if ((context.variant == MZF_LOADER_VARIANT_MZ800_HEADER) &&
+             context.mz800_header_high)
+    {
+        const uint16_t stage2_size = mz800_header_high_stage2_size();
+        const uint16_t stage2_source =
+            (uint16_t)(MZF_LOADER_MZ800_HEADER_ADDR +
+                       MZF_LOADER_MZ800_RELOCATOR_BYTES);
+        const uint16_t stage2_address = MZF_LOADER_HIGH_LOAD_ADDR;
+
+        high_saved_sp_address =
+            (uint16_t)(stage2_address + stage2_size);
+
+        /* Stage 1 @ $1110: copy ONLY stage 2 to $C000 and jump there. */
+        destination[offset++] = 0x21U;       /* ld hl,$111E */
+        write_le16(destination + offset, stage2_source);
+        offset = (uint16_t)(offset + 2U);
+
+        destination[offset++] = 0x11U;       /* ld de,$C000 */
+        write_le16(destination + offset, stage2_address);
+        offset = (uint16_t)(offset + 2U);
+
+        destination[offset++] = 0x01U;       /* ld bc,$0052 */
+        write_le16(destination + offset, stage2_size);
+        offset = (uint16_t)(offset + 2U);
+
+        destination[offset++] = 0xEDU;
+        destination[offset++] = 0xB0U;       /* ldir */
+
+        destination[offset++] = 0xC3U;       /* jp $C000 */
+        write_le16(destination + offset, stage2_address);
+        offset = (uint16_t)(offset + 2U);
+
+        /* Stage 2 image, assembled for execution at $C000. */
+        /*
+           The fake MZ800 header deliberately uses SIZE=$0000,
+           LOAD=$1200 and EXEC=$1110.  The monitor's 16-bit zero-size path
+           therefore performs the known 65536-byte self-LDIR at $1200
+           before finally entering this loader at $1110.
+
+           After that SIZE=$0000 quirk, the HIGH path needs enough of the
+           normal HLL monitor initialization for the memory-mapped
+           $E002/$E003 cassette handshake to work.  The smallest sequence
+           verified on real hardware so far is:
+
+             LD A,8
+             OUT (CE),A
+             CALL 073E
+             CALL 0308
+
+           Tests showed that removing either CALL $073E or CALL $0308
+           breaks the first SENSE/WRITE handshake.  LD (HL),1, zeroing
+           A/DE and CALL $02BE are not required for this HIGH path.
+           This is the minimum VERIFIED sequence, not a proof that no
+           shorter equivalent sequence or direct register setup exists.
+        */
+        destination[offset++] = 0x3EU;
+        destination[offset++] = 0x08U;
+        destination[offset++] = 0xD3U;
+        destination[offset++] = 0xCEU;
+        destination[offset++] = 0xCDU;
+        destination[offset++] = 0x3EU;
+        destination[offset++] = 0x07U;
+        destination[offset++] = 0xCDU;
+        destination[offset++] = 0x08U;
+        destination[offset++] = 0x03U;
+
+        /* Make low RAM writable before the payload transfer. */
+        for (uint8_t i = 0U; i < sizeof(mz800_high_low_ram_map_P); ++i)
+        {
+            destination[offset++] =
+                pgm_read_byte(mz800_high_low_ram_map_P + i);
+        }
+
+        /*
+           Keep the remaining payload length in BC'.  Main BC is then free
+           for the four handshake pairs that assemble each byte.  Because
+           the transfer loop uses no PUSH/POP, payloads starting in low RAM
+           cannot overwrite a live loader stack.
+        */
+        destination[offset++] = 0x01U;       /* ld bc,payload size */
+        write_le16(destination + offset, context.data_length);
+        offset = (uint16_t)(offset + 2U);
+        destination[offset++] = 0xD9U;       /* exx -> BC' = size */
+
+        destination[offset++] = 0x21U;       /* ld hl,payload load */
+        write_le16(destination + offset, context.data_load_address);
+        offset = (uint16_t)(offset + 2U);
+
+        for (uint8_t i = 0U;
+             i < (uint8_t)(sizeof(loader_body_mz800_header_high_exx_P) - 1U);
+             ++i)
+        {
+            destination[offset++] =
+                pgm_read_byte(loader_body_mz800_header_high_exx_P + i);
+        }
+
+        destination[offset++] = 0xC3U;       /* jp real exec */
+        write_le16(destination + offset, context.exec_address);
+        offset = (uint16_t)(offset + 2U);
+
         return offset;
     }
     destination[offset++] = 0x01U;
@@ -766,7 +951,8 @@ uint16_t mzf_loader_build_loader(uint8_t *destination, uint16_t capacity)
     {
         for (uint16_t i = 0U; i < (uint16_t)(sizeof(loader_body_P) - 1U); ++i)
         {
-            destination[offset++] = (uint8_t)pgm_read_byte(loader_body_P + i);
+            destination[offset++] =
+                (uint8_t)pgm_read_byte(loader_body_P + i);
         }
 
         destination[offset++] = 0xEDU;
@@ -779,7 +965,8 @@ uint16_t mzf_loader_build_loader(uint8_t *destination, uint16_t capacity)
     {
         for (uint16_t i = 0U; i < sizeof(loader_body_P); ++i)
         {
-            destination[offset++] = (uint8_t)pgm_read_byte(loader_body_P + i);
+            destination[offset++] =
+                (uint8_t)pgm_read_byte(loader_body_P + i);
         }
     }
     return offset;
