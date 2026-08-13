@@ -511,6 +511,10 @@ play_progress_phase_t play_engine_get_progress_phase(void)
             return PLAY_PROGRESS_PHASE_ULTRAFAST_LOADER_HIGH;
         case MZF_PLAYBACK_PHASE_ULTRAFAST_HEADER:
             return PLAY_PROGRESS_PHASE_ULTRAFAST_HEADER;
+        case MZF_PLAYBACK_PHASE_MZ700_UL_LOW:
+            return PLAY_PROGRESS_PHASE_MZ700_UL_LOW;
+        case MZF_PLAYBACK_PHASE_MZ700_UL_HIGH:
+            return PLAY_PROGRESS_PHASE_MZ700_UL_HIGH;
         case MZF_PLAYBACK_PHASE_IC_TURBO_LOADER:
             return PLAY_PROGRESS_PHASE_IC_TURBO_LOADER;
         case MZF_PLAYBACK_PHASE_IC_TURBO_DATA:

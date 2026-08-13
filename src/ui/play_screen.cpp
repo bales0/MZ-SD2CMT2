@@ -23,6 +23,8 @@ static const char text_phase_nll[] PROGMEM = "NLL";
 static const char text_phase_nlh[] PROGMEM = "NLH";
 static const char text_phase_hll[] PROGMEM = "HLL";
 static const char text_phase_hlh[] PROGMEM = "HLH";
+static const char text_phase_u7l[] PROGMEM = "U7L";
+static const char text_phase_u7h[] PROGMEM = "U7H";
 static const char text_phase_icl[] PROGMEM = "ICL";
 static const char text_phase_ic[] PROGMEM = "IC";
 static const char text_phase_tc[] PROGMEM = "TC";
@@ -98,6 +100,8 @@ static PGM_P progress_phase_label_P(play_progress_phase_t phase)
         case PLAY_PROGRESS_PHASE_ULTRAFAST_HEADER:
             return mzf_loader_is_mz800_header_high() ? text_phase_hlh :
                                                        text_phase_hll;
+        case PLAY_PROGRESS_PHASE_MZ700_UL_LOW: return text_phase_u7l;
+        case PLAY_PROGRESS_PHASE_MZ700_UL_HIGH: return text_phase_u7h;
         case PLAY_PROGRESS_PHASE_IC_TURBO_LOADER: return text_phase_icl;
         case PLAY_PROGRESS_PHASE_IC_TURBO_DATA: return text_phase_ic;
         case PLAY_PROGRESS_PHASE_TC_TURBO_LOADER: return text_phase_tc;

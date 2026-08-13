@@ -2100,6 +2100,10 @@ mzf_playback_phase_t mzf_playback_get_progress_phase(void)
             return MZF_PLAYBACK_PHASE_ULTRAFAST_LOADER_HIGH;
         case MZF_LOADER_VARIANT_MZ800_HEADER:
             return MZF_PLAYBACK_PHASE_ULTRAFAST_HEADER;
+        case MZF_LOADER_VARIANT_MZ700_UL_LOW:
+            return MZF_PLAYBACK_PHASE_MZ700_UL_LOW;
+        case MZF_LOADER_VARIANT_MZ700_UL_HIGH:
+            return MZF_PLAYBACK_PHASE_MZ700_UL_HIGH;
         case MZF_LOADER_VARIANT_MZ700_FAST3_LOW:
             return MZF_PLAYBACK_PHASE_MZ700_FAST3_LOW;
         case MZF_LOADER_VARIANT_MZ700_FAST3_HIGH:

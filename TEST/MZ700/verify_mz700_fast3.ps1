@@ -5,6 +5,8 @@ $repoRoot = Resolve-Path (Join-Path $testRoot '..\..')
 $romPath = Join-Path $testRoot 'mz700_1z-009a_jp.rom'
 $sourcePath = Join-Path $repoRoot 'src\play\mz700_fast3.cpp'
 $playbackPath = Join-Path $repoRoot 'src\play\mzf_playback.cpp'
+$loaderPath = Join-Path $repoRoot 'src\play\mzf_loader.cpp'
+$menuPath = Join-Path $repoRoot 'src\ui\menu.cpp'
 
 function Assert-True([bool]$condition, [string]$message) {
     if (-not $condition) { throw $message }
@@ -40,6 +42,14 @@ $rom = [IO.File]::ReadAllBytes($romPath)
 Assert-True ($rom.Length -eq 4096) 'The monitor ROM must be exactly 4096 bytes.'
 $qadcn = [byte[]]$rom[0x0A92..0x0B91]
 
+# UL status display uses the public QMSGX vector after directly clearing VRAM
+# with the verified 1Z-009A fill routine at $09DD.
+Assert-True (($rom[0x0018] -eq 0xC3) -and ($rom[0x0019] -eq 0xA1) -and
+             ($rom[0x001A] -eq 0x08)) 'ROM $0018 is not JP QMSGX ($08A1).'
+Assert-True (($rom[0x09DD] -eq 0xAF) -and ($rom[0x09DE] -eq 0x01) -and
+             ($rom[0x09DF] -eq 0x00) -and ($rom[0x09E0] -eq 0x08)) `
+    'ROM $09DD is not XOR A / LD BC,$0800 VRAM fill.'
+
 # Ensure the firmware embeds the exact forward QADCN table from this ROM.
 $source = Get-Content -Raw -LiteralPath $sourcePath
 $tableMatch = [regex]::Match(
@@ -56,7 +66,8 @@ for ($i = 0; $i -lt 256; ++$i) {
 
 # Every possible runtime size used by the implementation must encode and
 # decode to the exact intended LOW/HIGH stage, without source byte $0D.
-for ($runtimeSize = 86; $runtimeSize -le 103; ++$runtimeSize) {
+$runtimeSizes = @(81..104)
+foreach ($runtimeSize in $runtimeSizes) {
     foreach ($runtimeAddress in @(0x1108, 0xC000)) {
         $stage = New-Stage $runtimeAddress $runtimeSize
         Assert-True ($stage.Count -eq 14) 'Stage 1 must remain exactly 14 bytes.'
@@ -75,6 +86,32 @@ for ($runtimeSize = 86; $runtimeSize -le 103; ++$runtimeSize) {
     }
 }
 
+# MZ700 UL header-only combines a compact stack-free receiver with a ROM
+# screen clear and QMSGX display.  Every generated form must fit in the
+# 104-byte Description workspace.
+$loader = Get-Content -Raw -LiteralPath $loaderPath
+$menu = Get-Content -Raw -LiteralPath $menuPath
+Assert-True $loader.Contains('MZF_LOADER_MZ700_UL_PREFIX_BYTES 7U') `
+    'Unexpected MZ700 UL prefix size.'
+Assert-True $loader.Contains('MZF_LOADER_MZ700_UL_LOW_RAM_MAP_BYTES 2U') `
+    'Unexpected MZ700 UL low-RAM map size.'
+Assert-True $loader.Contains('MZF_LOADER_MZ700_UL_DISPLAY_BYTES 14U') `
+    'Unexpected MZ700 UL display code size.'
+Assert-True $loader.Contains('MZF_LOADER_MZ700_UL_CLEAR_ADDR 0x09DDU') `
+    'MZ700 UL does not use the verified ROM VRAM fill.'
+Assert-True $loader.Contains('MZF_LOADER_MZ700_UL_CURSOR_ADDR 0x1171U') `
+    'MZ700 UL does not reset the monitor cursor.'
+Assert-True $loader.Contains('''L'', ''O'', ''A'', ''D'', ''I'', ''N'', ''G'', '' ''') `
+    'MZ700 UL LOADING prefix is missing.'
+Assert-True $loader.Contains('MZF_LOADER_VARIANT_MZ700_UL_LOW') `
+    'MZ700 UL LOW variant is missing.'
+Assert-True $loader.Contains('MZF_LOADER_VARIANT_MZ700_UL_HIGH') `
+    'MZ700 UL HIGH variant is missing.'
+Assert-True $loader.Contains('destination[offset++] = 0xD9U;') `
+    'MZ700 UL receiver does not keep the transfer count in BC''.'
+Assert-True $menu.Contains('" UL MZ700"') `
+    'UL MZ700 menu entry is missing.'
+
 # Half-open overlap boundary regression checks.
 $testRuntimeSize = 96
 Assert-True (-not (Test-Overlap 0x1108 $testRuntimeSize 0x1107 1)) 'Byte ending at LOW start must not overlap.'
@@ -88,14 +125,18 @@ $bombmanSize = Read-Le16 $bombman 0x12
 $bombmanLoad = Read-Le16 $bombman 0x14
 $bombmanExec = Read-Le16 $bombman 0x16
 $bombmanName = [Text.Encoding]::ASCII.GetString($bombman, 1, 17).Trim([char]0, [char]13, ' ')
-$bombmanRuntimeSize = 78 + 8 + $bombmanName.Length
+$bombmanRuntimeSize = 73 + 8 + $bombmanName.Length
+$bombmanUlRuntimeSize = 68 + 14 + 8 + $bombmanName.Length + 1
 Assert-True ($bombmanName -eq 'BOMBER MAN') 'Unexpected Bombman name.'
 Assert-True ($bombmanSize -eq 0x2010) 'Unexpected Bombman SIZE.'
 Assert-True ($bombmanLoad -eq 0x1200) 'Unexpected Bombman LOAD.'
 Assert-True ($bombmanExec -eq 0x1200) 'Unexpected Bombman EXEC.'
-Assert-True ($bombmanRuntimeSize -eq 96) 'Bombman runtime must be 96 bytes.'
+Assert-True ($bombmanRuntimeSize -eq 91) 'Bombman FAST3 runtime must be 91 bytes.'
+Assert-True ($bombmanUlRuntimeSize -eq 101) 'Bombman MZ700 UL runtime must be 101 bytes.'
 Assert-True (-not (Test-Overlap 0x1108 $bombmanRuntimeSize $bombmanLoad $bombmanSize)) `
     'Bombman should select LOW.'
+Assert-True (-not (Test-Overlap 0x1108 $bombmanUlRuntimeSize $bombmanLoad $bombmanSize)) `
+    'Bombman should select MZ700 UL LOW.'
 
 # A one-byte payload at LOW start must force HIGH; a large payload spanning
 # both candidates must reject FAST3 and fall back safely.
@@ -163,9 +204,9 @@ Assert-True $source.Contains('destination[offset++] = 0x3EU; destination[offset+
     'FAST3 does not install the verified DLY3 operand $15.'
 Assert-True $source.Contains('write_le16(destination + offset, 0x00FEU)') `
     'RDDAT Carry errors are not returned to monitor CMT ERROR handling.'
-Assert-True $source.Contains('write_le16(destination + offset, 0xD027U)') `
-    'The pre-RDDAT screen marker is missing.'
+Assert-True (-not $source.Contains('write_le16(destination + offset, 0xD027U)')) `
+    'The obsolete pre-RDDAT R screen marker is still present.'
 Assert-True (-not $source.Contains('stage[10] = 0xB8U')) `
     'LOW stage still contains the obsolete LDDR relocation.'
 
-Write-Host 'MZ700 FAST3 verification passed.'
+Write-Host 'MZ700 header-only verification passed.'

@@ -15,7 +15,7 @@
 #define MZ700_FAST3_STAGE_BYTES 14U
 #define MZ700_FAST3_RUNTIME_SOURCE_ADDR 0x1108U
 #define MZ700_FAST3_DISPLAY_CODE_BYTES 24U
-#define MZ700_FAST3_CORE_BYTES 54U
+#define MZ700_FAST3_CORE_BYTES 49U
 #define MZ700_FAST3_STATUS_PREFIX_BYTES 8U
 
 /* Exact 1Z-009A QADCN table at ROM $0A92-$0B91.
@@ -225,11 +225,6 @@ static uint8_t build_runtime(uint8_t *destination,
     write_le16(destination + offset, payload_load); offset += 2U;
     destination[offset++] = 0x22U;
     write_le16(destination + offset, 0x1104U); offset += 2U;
-    /* Visible hand-off marker: the rightmost cell of the first row becomes
-       'R' only after ROM copy, DLY3 patch and workspace restore completed. */
-    destination[offset++] = 0x3EU; destination[offset++] = 0x12U;
-    destination[offset++] = 0x32U;             /* ld ($D027),a */
-    write_le16(destination + offset, 0xD027U); offset += 2U;
     destination[offset++] = 0xCDU;             /* call RDDAT */
     write_le16(destination + offset, 0x002AU); offset += 2U;
     /* RDDAT returns Carry with A=1/2 on a tape error.  The original monitor
@@ -247,19 +242,14 @@ static uint8_t build_runtime(uint8_t *destination,
     return offset;
 }
 
-bool mz700_fast3_build_header(uint8_t *header,
-                              uint16_t runtime_address,
-                              uint8_t runtime_size,
-                              uint16_t payload_size,
-                              uint16_t payload_load,
-                              uint16_t payload_exec,
-                              const uint8_t *original_name)
+static bool build_header_prefix(uint8_t *header,
+                                uint16_t runtime_address,
+                                uint8_t runtime_size)
 {
     uint8_t stage[MZ700_FAST3_STAGE_BYTES];
     uint8_t encoded[MZ700_FAST3_STAGE_BYTES];
-    uint8_t built_size;
 
-    if ((header == NULL) || (original_name == NULL) ||
+    if ((header == NULL) ||
         !build_stage(runtime_address, runtime_size, stage))
     {
         return false;
@@ -277,6 +267,40 @@ bool mz700_fast3_build_header(uint8_t *header,
     write_le16(header + MZ700_FAST3_HEADER_SIZE_OFFSET, 0U);
     write_le16(header + MZ700_FAST3_HEADER_LOAD_OFFSET, 0U);
     write_le16(header + MZ700_FAST3_HEADER_EXEC_OFFSET, MZ700_FAST3_HEADER_EXEC);
+    return true;
+}
+
+bool mz700_header_only_build(uint8_t *header,
+                             uint16_t runtime_address,
+                             const uint8_t *runtime,
+                             uint8_t runtime_size)
+{
+    if ((runtime == NULL) ||
+        !build_header_prefix(header, runtime_address, runtime_size))
+    {
+        return false;
+    }
+
+    memcpy(header + MZ700_FAST3_HEADER_RUNTIME_OFFSET,
+           runtime, runtime_size);
+    return true;
+}
+
+bool mz700_fast3_build_header(uint8_t *header,
+                              uint16_t runtime_address,
+                              uint8_t runtime_size,
+                              uint16_t payload_size,
+                              uint16_t payload_load,
+                              uint16_t payload_exec,
+                              const uint8_t *original_name)
+{
+    uint8_t built_size;
+
+    if ((original_name == NULL) ||
+        !build_header_prefix(header, runtime_address, runtime_size))
+    {
+        return false;
+    }
 
     built_size = build_runtime(header + MZ700_FAST3_HEADER_RUNTIME_OFFSET,
                                runtime_address, payload_size, payload_load,

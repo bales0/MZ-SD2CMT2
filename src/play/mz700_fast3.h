@@ -16,6 +16,12 @@ uint8_t mz700_fast3_runtime_size(
 bool mz700_fast3_stage_is_encodable(uint16_t runtime_address,
                                     uint8_t runtime_size);
 
+bool mz700_header_only_build(
+    uint8_t header[MZ700_FAST3_HEADER_BYTES],
+    uint16_t runtime_address,
+    const uint8_t *runtime,
+    uint8_t runtime_size);
+
 bool mz700_fast3_build_header(
     uint8_t header[MZ700_FAST3_HEADER_BYTES],
     uint16_t runtime_address,

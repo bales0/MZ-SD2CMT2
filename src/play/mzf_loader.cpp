@@ -36,15 +36,23 @@
 #define MZF_LOADER_PREFIX_BYTES 10U
 #define MZF_LOADER_MZ800_PREFIX_BYTES 6U
 #define MZF_LOADER_MZ800_RELOCATOR_BYTES 14U
+#define MZF_LOADER_MZ700_UL_PREFIX_BYTES 7U
+#define MZF_LOADER_MZ700_UL_LOW_RAM_MAP_BYTES 2U
+#define MZF_LOADER_MZ700_UL_DISPLAY_BYTES 14U
+#define MZF_LOADER_MZ700_UL_STATUS_PREFIX_BYTES 8U
+#define MZF_LOADER_MZ700_UL_STATUS_END_BYTES 1U
+#define MZF_LOADER_MZ700_UL_CLEAR_ADDR 0x09DDU
+#define MZF_LOADER_MZ700_UL_CURSOR_ADDR 0x1171U
+#define MZF_LOADER_MZ700_LOW_RAM_END 0x1000U
 #define MZF_LOADER_HIGH_STACK_SAVE_BYTES 4U
 #define MZF_LOADER_HIGH_STACK_SET_BYTES 3U
 #define MZF_LOADER_HIGH_STACK_RESTORE_BYTES 4U
 #define MZF_LOADER_HIGH_SAVED_SP_BYTES 2U
 #define MZF_LOADER_HIGH_STACK_BYTES 16U
 #define MZF_LOADER_START_DELAY_MS 100UL
-#define MZF_LOADER_MZ800_START_DELAY_MS 1000UL
-#define MZF_LOADER_MZ800_READY_DELAY_US 1000U
-#define MZF_LOADER_MZ800_INITIAL_TIMEOUT_US 5000000UL
+#define MZF_LOADER_HEADER_START_DELAY_MS 1000UL
+#define MZF_LOADER_HEADER_READY_DELAY_US 1000U
+#define MZF_LOADER_HEADER_INITIAL_TIMEOUT_US 5000000UL
 #define MZF_LOADER_TIMEOUT_US 500000UL
 
 static bool is_supported_file_type(uint8_t type)
@@ -221,6 +229,21 @@ static const uint8_t loader_body_mz800_header_high_exx_P[] PROGMEM =
     0x20U, 0xD4U, 0xC3U
 };
 
+static const uint8_t mz700_ul_status_prefix_P[
+    MZF_LOADER_MZ700_UL_STATUS_PREFIX_BYTES] PROGMEM =
+{
+    'L', 'O', 'A', 'D', 'I', 'N', 'G', ' '
+};
+
+static_assert((MZF_LOADER_MZ700_UL_PREFIX_BYTES +
+               MZF_LOADER_MZ700_UL_LOW_RAM_MAP_BYTES +
+               MZF_LOADER_MZ700_UL_DISPLAY_BYTES +
+               sizeof(loader_body_mz800_header_high_exx_P) + 2U +
+               MZF_LOADER_MZ700_UL_STATUS_PREFIX_BYTES + 11U +
+               MZF_LOADER_MZ700_UL_STATUS_END_BYTES) <=
+              MZ700_FAST3_RUNTIME_CAPACITY,
+              "MZ700 header-only UL runtime exceeds Description");
+
 
 typedef struct
 {
@@ -280,6 +303,12 @@ static bool is_tc_variant(mzf_loader_variant_t variant)
 {
     return (variant == MZF_LOADER_VARIANT_TC_1_3) ||
            (variant == MZF_LOADER_VARIANT_TC_1_2);
+}
+
+static bool is_mz700_ul_variant(mzf_loader_variant_t variant)
+{
+    return (variant == MZF_LOADER_VARIANT_MZ700_UL_LOW) ||
+           (variant == MZF_LOADER_VARIANT_MZ700_UL_HIGH);
 }
 
 static mzf_loader_variant_t mode_to_variant(loader_mode_t mode)
@@ -361,6 +390,59 @@ static uint16_t mz800_header_high_runtime_footprint(void)
 {
     /* The stack-free HIGH receiver needs no storage beyond stage 2. */
     return mz800_header_high_stage2_size();
+}
+
+static bool mz700_ul_needs_low_ram_map(void)
+{
+    return context.data_load_address < MZF_LOADER_MZ700_LOW_RAM_END;
+}
+
+static uint8_t mz700_ul_name_length(void)
+{
+    uint8_t length = 0U;
+
+    while ((length < MZ700_FAST3_NAME_BYTES) &&
+           (context.original_name[length] != 0x00U) &&
+           (context.original_name[length] != 0x0DU))
+    {
+        ++length;
+    }
+    while ((length != 0U) &&
+           (context.original_name[length - 1U] == 0x20U))
+    {
+        --length;
+    }
+
+    /* Keep code plus status within the 104-byte Description workspace.
+       Mapping a payload below $1000 consumes two additional bytes. */
+    const uint8_t maximum = mz700_ul_needs_low_ram_map() ? 11U : 13U;
+    if (length > maximum)
+    {
+        length = maximum;
+    }
+    return length;
+}
+
+static uint8_t mz700_ul_code_size(void)
+{
+    uint8_t size = (uint8_t)(MZF_LOADER_MZ700_UL_DISPLAY_BYTES +
+                             MZF_LOADER_MZ700_UL_PREFIX_BYTES +
+                             sizeof(loader_body_mz800_header_high_exx_P) +
+                             2U);
+
+    if (mz700_ul_needs_low_ram_map())
+    {
+        size = (uint8_t)(size + MZF_LOADER_MZ700_UL_LOW_RAM_MAP_BYTES);
+    }
+    return size;
+}
+
+static uint8_t mz700_ul_runtime_size(void)
+{
+    return (uint8_t)(mz700_ul_code_size() +
+                     MZF_LOADER_MZ700_UL_STATUS_PREFIX_BYTES +
+                     mz700_ul_name_length() +
+                     MZF_LOADER_MZ700_UL_STATUS_END_BYTES);
 }
 
 static uint16_t loader_size(loader_mode_t mode)
@@ -468,10 +550,11 @@ static bool wait_write_level(uint8_t expected)
     uint32_t timeout = MZF_LOADER_TIMEOUT_US;
 
     if (((context.variant == MZF_LOADER_VARIANT_MZ800_HEADER) ||
+         is_mz700_ul_variant(context.variant) ||
          (context.variant == MZF_LOADER_VARIANT_HIGH)) &&
         !context.initial_wait_used)
     {
-        timeout = MZF_LOADER_MZ800_INITIAL_TIMEOUT_US;
+        timeout = MZF_LOADER_HEADER_INITIAL_TIMEOUT_US;
     }
 
     while (write_level() != expected)
@@ -484,6 +567,7 @@ static bool wait_write_level(uint8_t expected)
     }
 
     if ((context.variant == MZF_LOADER_VARIANT_MZ800_HEADER) ||
+        is_mz700_ul_variant(context.variant) ||
         (context.variant == MZF_LOADER_VARIANT_HIGH))
     {
         context.initial_wait_used = true;
@@ -570,6 +654,36 @@ bool mzf_loader_prepare(file_format_t format,
     if (mode == LOADER_MODE_AUTO)
     {
         return false;
+    }
+    if (mode == LOADER_MODE_UL_MZ700)
+    {
+        const uint8_t runtime_size = mz700_ul_runtime_size();
+
+        if (!ranges_overlap(MZ700_FAST3_RUNTIME_LOW_ADDR, runtime_size,
+                            context.data_load_address, context.data_length) &&
+            mz700_fast3_stage_is_encodable(MZ700_FAST3_RUNTIME_LOW_ADDR,
+                                           runtime_size))
+        {
+            context.variant = MZF_LOADER_VARIANT_MZ700_UL_LOW;
+            context.loader_address = MZ700_FAST3_RUNTIME_LOW_ADDR;
+        }
+        else if (!ranges_overlap(MZ700_FAST3_RUNTIME_HIGH_ADDR, runtime_size,
+                                 context.data_load_address,
+                                 context.data_length) &&
+                 mz700_fast3_stage_is_encodable(MZ700_FAST3_RUNTIME_HIGH_ADDR,
+                                                runtime_size))
+        {
+            context.variant = MZF_LOADER_VARIANT_MZ700_UL_HIGH;
+            context.loader_address = MZ700_FAST3_RUNTIME_HIGH_ADDR;
+        }
+        else
+        {
+            return false;
+        }
+
+        context.loader_size = runtime_size;
+        context.active = true;
+        return true;
     }
     if (mode == LOADER_MODE_MZ700_3X)
     {
@@ -696,7 +810,8 @@ bool mzf_loader_is_ul_active(void)
 bool mzf_loader_is_header_only(void)
 {
     return context.active &&
-           (context.variant == MZF_LOADER_VARIANT_MZ800_HEADER);
+           ((context.variant == MZF_LOADER_VARIANT_MZ800_HEADER) ||
+            is_mz700_ul_variant(context.variant));
 }
 
 bool mzf_loader_is_mz800_header_high(void)
@@ -704,6 +819,17 @@ bool mzf_loader_is_mz800_header_high(void)
     return context.active &&
            (context.variant == MZF_LOADER_VARIANT_MZ800_HEADER) &&
            context.mz800_header_high;
+}
+
+bool mzf_loader_is_mz700_ul(void)
+{
+    return context.active && is_mz700_ul_variant(context.variant);
+}
+
+bool mzf_loader_is_mz700_ul_high(void)
+{
+    return context.active &&
+           (context.variant == MZF_LOADER_VARIANT_MZ700_UL_HIGH);
 }
 
 bool mzf_loader_is_mz700_fast3(void)
@@ -761,6 +887,17 @@ bool mzf_loader_patch_loader_header(uint8_t *header)
                                         context.data_load_address,
                                         context.exec_address,
                                         context.original_name);
+    }
+
+    if (mzf_loader_is_mz700_ul())
+    {
+        uint8_t runtime[MZ700_FAST3_RUNTIME_CAPACITY];
+        uint16_t built = mzf_loader_build_loader(
+            runtime, MZ700_FAST3_RUNTIME_CAPACITY);
+
+        return (built == context.loader_size) &&
+               mz700_header_only_build(header, context.loader_address,
+                                       runtime, (uint8_t)built);
     }
 
     if ((context.variant == MZF_LOADER_VARIANT_MZ800_HEADER) ||
@@ -839,6 +976,72 @@ uint16_t mzf_loader_build_loader(uint8_t *destination, uint16_t capacity)
         destination[MZF_LOADER_TC_SPEED_OFFSET] = tc_speed_byte();
         patch_tc_workspace_restore(destination);
         return MZF_LOADER_TC_LOADER_SIZE;
+    }
+
+    if (is_mz700_ul_variant(context.variant))
+    {
+        const uint8_t name_length = mz700_ul_name_length();
+        const uint16_t status_address =
+            (uint16_t)(context.loader_address + mz700_ul_code_size());
+
+        /* QMSGX prints through PRNT3, so a converted $C6 byte is not a
+           monitor clear command.  Clear the full character/attribute VRAM
+           directly with the verified 1Z-009A fill routine at $09DD.  It
+           returns HL=$D800; L is therefore zero and LD H,L cheaply produces
+           cursor position $0000 for ($1171).  Keep all ROM calls before a
+           possible low-RAM mapping switch. */
+        destination[offset++] = 0x21U;           /* ld hl,$D000 */
+        write_le16(destination + offset, 0xD000U);
+        offset = (uint16_t)(offset + 2U);
+        destination[offset++] = 0xCDU;           /* call $09DD */
+        write_le16(destination + offset, MZF_LOADER_MZ700_UL_CLEAR_ADDR);
+        offset = (uint16_t)(offset + 2U);
+        destination[offset++] = 0x65U;           /* ld h,l -> hl=$0000 */
+        destination[offset++] = 0x22U;           /* ld ($1171),hl */
+        write_le16(destination + offset, MZF_LOADER_MZ700_UL_CURSOR_ADDR);
+        offset = (uint16_t)(offset + 2U);
+        destination[offset++] = 0x11U;           /* ld de,status */
+        write_le16(destination + offset, status_address);
+        offset = (uint16_t)(offset + 2U);
+        destination[offset++] = 0xDFU;           /* rst $18: QMSGX */
+
+        if (mz700_ul_needs_low_ram_map())
+        {
+            destination[offset++] = 0xD3U;
+            destination[offset++] = 0xE0U;       /* out ($E0),a: low RAM */
+        }
+
+        destination[offset++] = 0x01U;           /* ld bc,payload size */
+        write_le16(destination + offset, context.data_length);
+        offset = (uint16_t)(offset + 2U);
+        destination[offset++] = 0xD9U;           /* exx: count -> BC' */
+
+        destination[offset++] = 0x21U;           /* ld hl,payload load */
+        write_le16(destination + offset, context.data_load_address);
+        offset = (uint16_t)(offset + 2U);
+
+        for (uint8_t i = 0U;
+             i < (uint8_t)(sizeof(loader_body_mz800_header_high_exx_P) - 1U);
+             ++i)
+        {
+            destination[offset++] =
+                pgm_read_byte(loader_body_mz800_header_high_exx_P + i);
+        }
+
+        destination[offset++] = 0xC3U;           /* jp real exec */
+        write_le16(destination + offset, context.exec_address);
+        offset = (uint16_t)(offset + 2U);
+
+        for (uint8_t i = 0U;
+             i < MZF_LOADER_MZ700_UL_STATUS_PREFIX_BYTES; ++i)
+        {
+            destination[offset++] =
+                pgm_read_byte(mz700_ul_status_prefix_P + i);
+        }
+        memcpy(destination + offset, context.original_name, name_length);
+        offset = (uint16_t)(offset + name_length);
+        destination[offset++] = 0x0DU;
+        return offset;
     }
 
     if (context.variant == MZF_LOADER_VARIANT_HIGH)
@@ -1064,12 +1267,12 @@ bool mzf_loader_begin(void)
     context.started = true;
 
     mz_sense_set_fast(true);
-    if (context.variant == MZF_LOADER_VARIANT_MZ800_HEADER)
+    if (mzf_loader_is_header_only())
     {
         mz_read_set_fast(false);
-        delay(MZF_LOADER_MZ800_START_DELAY_MS);
+        delay(MZF_LOADER_HEADER_START_DELAY_MS);
         mz_read_set_fast(true);
-        delayMicroseconds(MZF_LOADER_MZ800_READY_DELAY_US);
+        delayMicroseconds(MZF_LOADER_HEADER_READY_DELAY_US);
     }
     else
     {
