@@ -26,6 +26,7 @@ typedef struct
 } record_engine_config_t;
 
 void record_engine_init(void);
+/* directory_path must remain valid while an armed/active session exists. */
 bool record_engine_start(const char *directory_path, const record_engine_config_t *config);
 void record_engine_service(void);
 void record_engine_toggle_pause(void);

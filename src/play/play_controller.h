@@ -5,7 +5,6 @@
 #include "../ui/menu.h"
 #include "play_engine.h"
 
-#define PLAY_CONTROLLER_NAME_MAX 64
 #define PLAY_CONTROLLER_PATH_MAX 160
 
 typedef enum
@@ -48,7 +47,7 @@ typedef struct
 
 void play_controller_init(void);
 void play_controller_start_session(const char *filename,
-                                   const char *full_path,
+                                   const char *directory_path,
                                    bool invert_signal,
                                    loader_mode_t loader_mode,
                                    play_control_mode_t control_mode);

@@ -32,6 +32,7 @@ typedef enum
 
 typedef struct
 {
+    /* Must remain valid and unchanged for the prepared Play session. */
     const char *full_path;
     file_format_t format;
     bool invert_signal;

@@ -144,11 +144,11 @@ static void app_enter_browser(void)
     lcd_clear();
 }
 
-static void app_enter_play(const char *filename, const char *full_path)
+static void app_enter_play(const char *filename, const char *directory_path)
 {
     browser_save_position();
     browser_clear_status();
-    play_controller_start_session(filename, full_path,
+    play_controller_start_session(filename, directory_path,
                                   menu_get_invert_signal(),
                                   menu_get_loader_mode(),
                                   menu_get_play_control_mode());
@@ -174,7 +174,7 @@ static void app_handle_browser_event(button_event_t event)
     switch (action)
     {
         case BROWSER_ACTION_FILE_SELECTED:
-            app_enter_play(browser_get_selected_name(), browser_get_selected_full_path());
+            app_enter_play(browser_get_selected_name(), browser_get_current_path());
             break;
         case BROWSER_ACTION_RECORD_REQUESTED:
             app_enter_record();

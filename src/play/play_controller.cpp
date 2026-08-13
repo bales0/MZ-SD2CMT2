@@ -6,7 +6,6 @@
 #include "../drivers/mzio.h"
 #include "../drivers/wav_playback_driver.h"
 
-static char session_filename[PLAY_CONTROLLER_NAME_MAX];
 static char session_full_path[PLAY_CONTROLLER_PATH_MAX];
 static file_format_t session_format = FILE_FORMAT_UNKNOWN;
 static bool session_invert_signal = false;
@@ -22,6 +21,47 @@ static bool motor_control_released = false;
    current MOTOR level immediately owns the transport again. */
 static bool paused_by_motor = false;
 static bool paused_by_user = false;
+
+static const char *play_controller_session_filename(void)
+{
+    const char *last_slash = strrchr(session_full_path, '/');
+    return (last_slash == NULL) ? session_full_path : last_slash + 1U;
+}
+
+static bool play_controller_build_full_path(const char *directory_path,
+                                            const char *filename)
+{
+    size_t directory_length;
+    size_t filename_length;
+    bool add_separator;
+    size_t output_offset;
+
+    session_full_path[0] = '\0';
+    if ((directory_path == NULL) || (filename == NULL) ||
+        (directory_path[0] == '\0') || (filename[0] == '\0'))
+    {
+        return false;
+    }
+
+    directory_length = strlen(directory_path);
+    filename_length = strlen(filename);
+    add_separator = directory_path[directory_length - 1U] != '/';
+
+    if ((directory_length + (add_separator ? 1U : 0U) + filename_length) >=
+        sizeof(session_full_path))
+    {
+        return false;
+    }
+
+    memcpy(session_full_path, directory_path, directory_length);
+    output_offset = directory_length;
+    if (add_separator)
+    {
+        session_full_path[output_offset++] = '/';
+    }
+    memcpy(session_full_path + output_offset, filename, filename_length + 1U);
+    return true;
+}
 
 static bool play_controller_can_start(void)
 {
@@ -119,7 +159,6 @@ static void play_controller_resume_from_user(void)
 
 void play_controller_init(void)
 {
-    session_filename[0] = '\0';
     session_full_path[0] = '\0';
     session_format = FILE_FORMAT_UNKNOWN;
     session_invert_signal = false;
@@ -133,26 +172,23 @@ void play_controller_init(void)
 }
 
 void play_controller_start_session(const char *filename,
-                                   const char *full_path,
+                                   const char *directory_path,
                                    bool invert_signal,
                                    loader_mode_t loader_mode,
                                    play_control_mode_t control_mode)
 {
-    if (filename == NULL) session_filename[0] = '\0';
-    else
+    if (!play_controller_build_full_path(directory_path, filename))
     {
-        strncpy(session_filename, filename, sizeof(session_filename) - 1U);
-        session_filename[sizeof(session_filename) - 1U] = '\0';
+        session_format = FILE_FORMAT_UNKNOWN;
+        session_state = PLAY_CONTROLLER_STATE_READY;
+        waiting_for_motor = false;
+        motor_control_released = false;
+        play_controller_clear_pause_reason();
+        play_engine_stop();
+        return;
     }
 
-    if (full_path == NULL) session_full_path[0] = '\0';
-    else
-    {
-        strncpy(session_full_path, full_path, sizeof(session_full_path) - 1U);
-        session_full_path[sizeof(session_full_path) - 1U] = '\0';
-    }
-
-    session_format = file_format_detect_from_name(session_filename);
+    session_format = file_format_detect_from_name(filename);
     session_invert_signal = invert_signal;
     session_loader_mode = loader_mode;
     session_control_mode = control_mode;
@@ -331,7 +367,7 @@ void play_controller_get_view(play_controller_view_t *view)
 {
     if (view == NULL) return;
 
-    view->filename = session_filename;
+    view->filename = play_controller_session_filename();
     view->full_path = session_full_path;
     view->format = session_format;
     view->invert_signal = session_invert_signal;
@@ -352,7 +388,7 @@ void play_controller_get_view(play_controller_view_t *view)
     view->buffer_fill_percent = play_engine_get_buffer_fill_percent();
 }
 
-const char* play_controller_get_filename(void) { return session_filename; }
+const char* play_controller_get_filename(void) { return play_controller_session_filename(); }
 const char* play_controller_get_full_path(void) { return session_full_path; }
 file_format_t play_controller_get_format(void) { return session_format; }
 bool play_controller_get_invert_signal(void) { return session_invert_signal; }

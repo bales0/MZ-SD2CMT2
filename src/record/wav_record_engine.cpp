@@ -8,9 +8,7 @@
 #include "../streams/record_sample_stream.h"
 #include "../streams/wav_sample_stream.h"
 #include "../drivers/flash_text.h"
-
-#define WAV_RECORD_PATH_MAX 160U
-#define WAV_RECORD_FILENAME_MAX 16U
+#include "record_path_buffer.h"
 
 /* 64 packed bytes expand exactly to one 512-byte PCM sector. */
 #define WAV_RECORD_RAW_BLOCK_BYTES 64U
@@ -28,8 +26,6 @@
 
 static wav_record_engine_state_t record_state = WAV_RECORD_ENGINE_STOPPED;
 
-static char record_full_path[WAV_RECORD_PATH_MAX];
-static char record_filename[WAV_RECORD_FILENAME_MAX];
 static char record_error_text[17];
 
 static uint32_t record_sample_rate = 0UL;
@@ -82,18 +78,16 @@ static bool wav_record_make_paths(const char *directory_path)
         return false;
     }
 
-    length = flash_text_snprintf(record_full_path, sizeof(record_full_path),
+    length = flash_text_snprintf(record_path_buffer, sizeof(record_path_buffer),
                                  PSTR("%s/REC%04u.WAV"), directory_path,
                                  (unsigned int)sequence);
 
-    if ((length <= 0) || ((size_t)length >= sizeof(record_full_path)))
+    if ((length <= 0) || ((size_t)length >= sizeof(record_path_buffer)))
     {
         wav_record_set_error_P(PSTR("PATH TOO LONG"));
         return false;
     }
 
-    flash_text_snprintf(record_filename, sizeof(record_filename),
-                        PSTR("REC%04u.WAV"), (unsigned int)sequence);
     return true;
 }
 
@@ -328,8 +322,7 @@ void wav_record_engine_init(void)
     wav_record_driver_init();
 
     record_state = WAV_RECORD_ENGINE_STOPPED;
-    record_full_path[0] = '\0';
-    record_filename[0] = '\0';
+    record_path_buffer[0] = '\0';
     record_error_text[0] = '\0';
     record_sample_rate = 0UL;
     data_bytes_written = 0UL;
@@ -374,7 +367,7 @@ bool wav_record_engine_start(const char *directory_path,
 
     record_sample_rate = sample_rate;
 
-    if (!sdcard_file_open_write(record_full_path))
+    if (!sdcard_file_open_write(record_path_buffer))
     {
         wav_record_set_error_P(PSTR("WAV CREATE ERR"));
         record_state = WAV_RECORD_ENGINE_ERROR;
@@ -435,9 +428,9 @@ void wav_record_engine_cancel(void)
 {
     wav_record_driver_stop();
     sdcard_file_close();
-    if (record_full_path[0] != '\0')
+    if (record_path_buffer[0] != '\0')
     {
-        (void)sdcard_file_remove(record_full_path);
+        (void)sdcard_file_remove(record_path_buffer);
     }
     record_state = WAV_RECORD_ENGINE_STOPPED;
     data_bytes_written = 0UL;
@@ -519,12 +512,12 @@ wav_record_engine_state_t wav_record_engine_get_state(void)
 
 const char *wav_record_engine_get_filename(void)
 {
-    return record_filename;
+    return record_path_filename();
 }
 
 const char *wav_record_engine_get_full_path(void)
 {
-    return record_full_path;
+    return record_path_buffer;
 }
 
 const char *wav_record_engine_get_error_text(void)

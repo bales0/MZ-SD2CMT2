@@ -9,12 +9,12 @@
 #include "../drivers/wav_playback_driver.h"
 #include "../streams/wav_sample_stream.h"
 
-#define PLAY_ENGINE_PATH_MAX 160
 #define PLAY_ENGINE_ERROR_TEXT_MAX 17
 #define WAV_STREAM_REFILL_RESERVE \
     (WAV_SAMPLE_STREAM_CAPACITY_SAMPLES - WAV_SAMPLE_STREAM_REFILL_BLOCK)
 
-static char prepared_full_path[PLAY_ENGINE_PATH_MAX];
+/* The controller owns this immutable buffer for the complete Play session. */
+static const char *prepared_full_path = NULL;
 static file_format_t prepared_format = FILE_FORMAT_UNKNOWN;
 static bool prepared_invert_signal = false;
 static loader_mode_t prepared_loader_mode = LOADER_MODE_OFF;
@@ -250,7 +250,7 @@ static bool play_engine_prepare_saved_source(void)
 
 void play_engine_init(void)
 {
-    prepared_full_path[0] = '\0';
+    prepared_full_path = NULL;
     prepared_format = FILE_FORMAT_UNKNOWN;
     prepared_invert_signal = false;
     prepared_loader_mode = LOADER_MODE_OFF;
@@ -276,8 +276,7 @@ bool play_engine_prepare(const play_engine_config_t *config)
         return false;
     }
 
-    strncpy(prepared_full_path, config->full_path, sizeof(prepared_full_path) - 1U);
-    prepared_full_path[sizeof(prepared_full_path) - 1U] = '\0';
+    prepared_full_path = config->full_path;
     prepared_format = config->format;
     prepared_invert_signal = config->invert_signal;
     prepared_loader_mode = config->loader_mode;

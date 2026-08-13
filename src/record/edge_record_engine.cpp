@@ -8,9 +8,8 @@
 #include "../streams/wav_sample_stream.h"
 #include "../streams/cmt_mode_scratch.h"
 #include "../drivers/flash_text.h"
+#include "record_path_buffer.h"
 
-#define EDGE_RECORD_PATH_MAX 160U
-#define EDGE_RECORD_FILENAME_MAX 16U
 #define EDGE_RECORD_STAGE_BYTES 512U
 #define EDGE_RECORD_FINAL_PREALLOCATE_BYTES (2UL * 1024UL * 1024UL)
 
@@ -33,8 +32,6 @@ typedef enum
 
 static edge_record_engine_state_t record_state = EDGE_RECORD_ENGINE_STOPPED;
 static file_format_t record_format = FILE_FORMAT_UNKNOWN;
-static char record_full_path[EDGE_RECORD_PATH_MAX];
-static char record_filename[EDGE_RECORD_FILENAME_MAX];
 static char record_error_text[17];
 
 /* Two 512-byte standard-output sectors. Stage 1 reuses browser-only RAM. */
@@ -106,29 +103,19 @@ static bool edge_record_make_paths(const char *directory_path)
     }
 
     length = (record_format == FILE_FORMAT_L16) ?
-        flash_text_snprintf(record_full_path, sizeof(record_full_path),
+        flash_text_snprintf(record_path_buffer, sizeof(record_path_buffer),
                             PSTR("%s/REC%04u.L16"), directory_path,
                             (unsigned int)sequence) :
-        flash_text_snprintf(record_full_path, sizeof(record_full_path),
+        flash_text_snprintf(record_path_buffer, sizeof(record_path_buffer),
                             PSTR("%s/REC%04u.LEP"), directory_path,
                             (unsigned int)sequence);
 
-    if ((length <= 0) || ((size_t)length >= sizeof(record_full_path)))
+    if ((length <= 0) || ((size_t)length >= sizeof(record_path_buffer)))
     {
         edge_record_set_error_P(PSTR("PATH TOO LONG"));
         return false;
     }
 
-    if (record_format == FILE_FORMAT_L16)
-    {
-        flash_text_snprintf(record_filename, sizeof(record_filename),
-                            PSTR("REC%04u.L16"), (unsigned int)sequence);
-    }
-    else
-    {
-        flash_text_snprintf(record_filename, sizeof(record_filename),
-                            PSTR("REC%04u.LEP"), (unsigned int)sequence);
-    }
     return true;
 }
 
@@ -566,9 +553,9 @@ static void edge_record_fail_close(const char *text)
 
     edge_record_driver_abort();
     sdcard_file_close();
-    if (record_full_path[0] != '\0')
+    if (record_path_buffer[0] != '\0')
     {
-        (void)sdcard_file_remove(record_full_path);
+        (void)sdcard_file_remove(record_path_buffer);
     }
     record_state = EDGE_RECORD_ENGINE_ERROR;
 }
@@ -582,9 +569,9 @@ static void edge_record_fail_close_P(PGM_P text)
 
     edge_record_driver_abort();
     sdcard_file_close();
-    if (record_full_path[0] != '\0')
+    if (record_path_buffer[0] != '\0')
     {
-        (void)sdcard_file_remove(record_full_path);
+        (void)sdcard_file_remove(record_path_buffer);
     }
     record_state = EDGE_RECORD_ENGINE_ERROR;
 }
@@ -594,8 +581,7 @@ void edge_record_engine_init(void)
     edge_record_driver_init();
     record_state = EDGE_RECORD_ENGINE_STOPPED;
     record_format = FILE_FORMAT_UNKNOWN;
-    record_full_path[0] = '\0';
-    record_filename[0] = '\0';
+    record_path_buffer[0] = '\0';
     record_error_text[0] = '\0';
     stage_count[0] = 0U;
     stage_count[1] = 0U;
@@ -665,7 +651,7 @@ bool edge_record_engine_start(const char *directory_path, file_format_t format)
         record_state = EDGE_RECORD_ENGINE_ERROR;
         return false;
     }
-    if (!sdcard_file_open_write(record_full_path))
+    if (!sdcard_file_open_write(record_path_buffer))
     {
         edge_record_set_error_P(PSTR("EDGE CREATE"));
         record_state = EDGE_RECORD_ENGINE_ERROR;
@@ -734,9 +720,9 @@ void edge_record_engine_cancel(void)
 {
     edge_record_driver_abort();
     sdcard_file_close();
-    if (record_full_path[0] != '\0')
+    if (record_path_buffer[0] != '\0')
     {
-        (void)sdcard_file_remove(record_full_path);
+        (void)sdcard_file_remove(record_path_buffer);
     }
     record_state = EDGE_RECORD_ENGINE_STOPPED;
 }
@@ -810,12 +796,12 @@ edge_record_engine_state_t edge_record_engine_get_state(void)
 
 const char *edge_record_engine_get_filename(void)
 {
-    return record_filename;
+    return record_path_filename();
 }
 
 const char *edge_record_engine_get_full_path(void)
 {
-    return record_full_path;
+    return record_path_buffer;
 }
 
 const char *edge_record_engine_get_error_text(void)

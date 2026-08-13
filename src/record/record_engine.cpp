@@ -11,7 +11,8 @@
 
 static record_engine_state_t engine_state = RECORD_ENGINE_STOPPED;
 static record_engine_config_t engine_config = { FILE_FORMAT_WAV, 44100UL, RECORD_CONTROL_MOTOR };
-static char engine_directory[96];
+/* The caller owns this stable path while a Record session is active. */
+static const char *engine_directory = NULL;
 static char engine_error[17];
 static bool capture_started = false;
 
@@ -221,7 +222,7 @@ void record_engine_init(void)
     engine_config.format = FILE_FORMAT_WAV;
     engine_config.wav_sample_rate = 44100UL;
     engine_config.control_mode = RECORD_CONTROL_MOTOR;
-    engine_directory[0] = '\0';
+    engine_directory = NULL;
     engine_error[0] = '\0';
     capture_started = false;
     record_engine_clear_pause_reason();
@@ -245,8 +246,7 @@ bool record_engine_start(const char *directory_path, const record_engine_config_
         return false;
     }
 
-    strncpy(engine_directory, directory_path, sizeof(engine_directory) - 1U);
-    engine_directory[sizeof(engine_directory) - 1U] = '\0';
+    engine_directory = directory_path;
     engine_config = *config;
 
     if (engine_config.control_mode == RECORD_CONTROL_MANUAL)

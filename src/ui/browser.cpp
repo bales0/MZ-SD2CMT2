@@ -9,7 +9,6 @@
 #define MAX_DIR_ENTRIES 999
 #define BROWSER_PATH_MAX 96
 #define BROWSER_NAME_MAX SDCARD_ENTRY_NAME_MAX
-#define BROWSER_FULL_PATH_MAX 160
 #define MESSAGE_HOLD_MS 1200
 #define LCD_COLUMNS 16U
 #define NAME_SCROLL_START_MS 900U
@@ -25,9 +24,7 @@ static uint16_t dir_count = 0;
 static uint16_t selected_index = 0;
 static char current_path[BROWSER_PATH_MAX] = { '/', '\0' };
 static sdcard_entry_t current_entry;
-static char selected_full_path[BROWSER_FULL_PATH_MAX];
 static bool saved_position_valid = false;
-static char saved_path[BROWSER_PATH_MAX] = { '/', '\0' };
 static char saved_name[BROWSER_NAME_MAX];
 static bool saved_is_dir = false;
 static char status_message[17];
@@ -47,7 +44,6 @@ static uint16_t wrap_pause_until_ms = 0U;
 static void browser_reset_name_scroll(void);
 static void browser_reset_path_scroll(void);
 static void browser_reset_wrap_pause(void);
-static void browser_update_selected_full_path(void);
 
 static void lcd_print_line(uint8_t row, const char *text)
 {
@@ -105,7 +101,6 @@ static void browser_set_current_entry_message_P(PGM_P message)
     current_entry.is_dir = false;
     current_entry.size = 0U;
     browser_reset_name_scroll();
-    browser_update_selected_full_path();
 }
 
 static bool browser_is_root(void)
@@ -151,25 +146,6 @@ static bool browser_wrap_pause_elapsed(int8_t direction)
     return true;
 }
 
-static void browser_update_selected_full_path(void)
-{
-    if (current_entry.name_too_long || (current_entry.name[0] == '\0'))
-    {
-        selected_full_path[0] = '\0';
-        return;
-    }
-    if (browser_is_root())
-    {
-        selected_full_path[0] = '/';
-        strncpy(&selected_full_path[1], current_entry.name, sizeof(selected_full_path) - 2U);
-        selected_full_path[sizeof(selected_full_path) - 1U] = '\0';
-    }
-    else
-    {
-        flash_text_snprintf(selected_full_path, sizeof(selected_full_path), PSTR("%s/%s"), current_path, current_entry.name);
-    }
-}
-
 static void browser_set_current_entry_message(const char *message)
 {
     memset(&current_entry, 0, sizeof(current_entry));
@@ -178,7 +154,6 @@ static void browser_set_current_entry_message(const char *message)
     current_entry.is_dir = false;
     current_entry.size = 0;
     browser_reset_name_scroll();
-    browser_update_selected_full_path();
 }
 
 typedef enum
@@ -252,7 +227,6 @@ static browser_directory_load_result_t browser_scan_current_directory(void)
     current_entry = first_entry;
     browser_reset_name_scroll();
     browser_reset_wrap_pause();
-    browser_update_selected_full_path();
     return BROWSER_DIRECTORY_LOADED;
 }
 
@@ -283,7 +257,6 @@ static bool browser_load_last_entry(void)
     selected_index = (uint16_t)(dir_count - 1U);
     browser_reset_name_scroll();
     browser_reset_wrap_pause();
-    browser_update_selected_full_path();
     return true;
 }
 
@@ -299,10 +272,7 @@ static void browser_reset_root_state(void)
     dir_count = 0U;
     selected_index = 0U;
     memset(&current_entry, 0, sizeof(current_entry));
-    selected_full_path[0] = '\0';
     saved_position_valid = false;
-    saved_path[0] = '/';
-    saved_path[1] = '\0';
     saved_name[0] = '\0';
     saved_is_dir = false;
     browser_reset_name_scroll();
@@ -385,17 +355,12 @@ static bool browser_restore_entry_by_identity(const char *name, bool is_dir)
     selected_index = resolved_index;
     current_entry = entry;
     browser_reset_name_scroll();
-    browser_update_selected_full_path();
     return true;
 }
 
 static bool browser_find_saved_position(void)
 {
     if (!saved_position_valid)
-    {
-        return false;
-    }
-    if (strcmp(current_path, saved_path) != 0)
     {
         return false;
     }
@@ -518,7 +483,6 @@ static bool browser_load_sorted_neighbor(bool previous)
     }
     browser_reset_name_scroll();
     browser_reset_wrap_pause();
-    browser_update_selected_full_path();
     return true;
 }
 
@@ -1022,12 +986,6 @@ const char* browser_get_selected_name(void)
     return current_entry.name;
 }
 
-const char* browser_get_selected_full_path(void)
-{
-    browser_update_selected_full_path();
-    return selected_full_path;
-}
-
 bool browser_selected_is_directory(void)
 {
     return current_entry.is_dir;
@@ -1035,8 +993,6 @@ bool browser_selected_is_directory(void)
 
 void browser_save_position(void)
 {
-    strncpy(saved_path, current_path, sizeof(saved_path) - 1U);
-    saved_path[sizeof(saved_path) - 1U] = '\0';
     strncpy(saved_name, current_entry.name, sizeof(saved_name) - 1U);
     saved_name[sizeof(saved_name) - 1U] = '\0';
     saved_is_dir = current_entry.is_dir;
