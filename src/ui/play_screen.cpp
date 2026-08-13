@@ -26,6 +26,8 @@ static const char text_phase_hlh[] PROGMEM = "HLH";
 static const char text_phase_icl[] PROGMEM = "ICL";
 static const char text_phase_ic[] PROGMEM = "IC";
 static const char text_phase_tc[] PROGMEM = "TC";
+static const char text_phase_f3l[] PROGMEM = "F3L";
+static const char text_phase_f3h[] PROGMEM = "F3H";
 static const char text_phase_ul[] PROGMEM = "UL";
 
 static void lcd_print_fixed(uint8_t row, const char *text)
@@ -100,6 +102,8 @@ static PGM_P progress_phase_label_P(play_progress_phase_t phase)
         case PLAY_PROGRESS_PHASE_IC_TURBO_DATA: return text_phase_ic;
         case PLAY_PROGRESS_PHASE_TC_TURBO_LOADER: return text_phase_tc;
         case PLAY_PROGRESS_PHASE_TC_TURBO_DATA: return text_phase_tc;
+        case PLAY_PROGRESS_PHASE_MZ700_FAST3_LOW: return text_phase_f3l;
+        case PLAY_PROGRESS_PHASE_MZ700_FAST3_HIGH: return text_phase_f3h;
         case PLAY_PROGRESS_PHASE_ULTRAFAST_DATA: return text_phase_ul;
         default: return NULL;
     }

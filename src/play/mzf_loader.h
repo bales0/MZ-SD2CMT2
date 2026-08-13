@@ -30,6 +30,8 @@ typedef enum
     MZF_LOADER_VARIANT_LOW,
     MZF_LOADER_VARIANT_HIGH,
     MZF_LOADER_VARIANT_MZ800_HEADER,
+    MZF_LOADER_VARIANT_MZ700_FAST3_LOW,
+    MZF_LOADER_VARIANT_MZ700_FAST3_HIGH,
     MZF_LOADER_VARIANT_IC_1_4,
     MZF_LOADER_VARIANT_IC_1_3,
     MZF_LOADER_VARIANT_IC_1_2,
@@ -49,13 +51,15 @@ bool mzf_loader_is_active(void);
 bool mzf_loader_is_ul_active(void);
 bool mzf_loader_is_header_only(void);
 bool mzf_loader_is_mz800_header_high(void);
+bool mzf_loader_is_mz700_fast3(void);
+bool mzf_loader_is_mz700_fast3_high(void);
 bool mzf_loader_is_ic_turbo(void);
 bool mzf_loader_is_tc_turbo(void);
 bool mzf_loader_is_tape_turbo(void);
 mzf_loader_variant_t mzf_loader_get_variant(void);
 
 uint16_t mzf_loader_get_loader_size(void);
-void mzf_loader_patch_loader_header(uint8_t *header);
+bool mzf_loader_patch_loader_header(uint8_t *header);
 uint16_t mzf_loader_build_loader(uint8_t *destination, uint16_t capacity);
 
 bool mzf_loader_begin(void);

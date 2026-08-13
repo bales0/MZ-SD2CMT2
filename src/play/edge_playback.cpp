@@ -438,7 +438,6 @@ void edge_playback_service(void)
         (edge_state == EDGE_PLAYBACK_BAD_FILE))
     {
         sdcard_file_close();
-        mz_sense_set(true);
     }
 }
 

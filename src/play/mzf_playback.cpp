@@ -50,6 +50,12 @@
 #define MZF_IC_1_3_SHORT_LOW_TICKS  MZF_US_TO_TICKS(96U)
 #define MZF_IC_1_3_LONG_HIGH_TICKS  MZF_US_TO_TICKS(224U)
 #define MZF_IC_1_3_LONG_LOW_TICKS   MZF_US_TO_TICKS(192U)
+/* MZ-700 1Z-009A FAST3 runs the patched DLY3 routine from RAM.  With the
+   verified $15 operand its input sample point is about 97 us after the edge.
+   Keep both halves symmetric and leave margin for the software-edge ISR:
+   short below the sample point, long at exactly twice the short interval. */
+#define MZF_MZ700_3X_SHORT_TICKS MZF_US_TO_TICKS(80U)
+#define MZF_MZ700_3X_LONG_TICKS  MZF_US_TO_TICKS(160U)
 #define MZF_IC_1_2_SHORT_HIGH_TICKS MZF_US_TO_TICKS(144U)
 #define MZF_IC_1_2_SHORT_LOW_TICKS  MZF_US_TO_TICKS(112U)
 #define MZF_IC_1_2_LONG_HIGH_TICKS  MZF_US_TO_TICKS(256U)
@@ -84,6 +90,7 @@
 */
 #define MZF_BOUNDARY_AUTO_CONTINUE_MS 120U
 #define MZF_IC_TURBO_START_DELAY_MS 345U
+#define MZF_MZ700_FAST3_START_DELAY_MS 400U
 #define MZF_TC_TURBO_START_DELAY_MS 110U
 #define MZF_IC_TURBO_GAP_SHORT_PULSES 5500U
 #define MZF_TC_1_3_TURBO_GAP_SHORT_PULSES 15130U
@@ -175,7 +182,6 @@ static void mzf_set_error_P(PGM_P text, mzf_playback_state_t state)
 {
     flash_text_copy(mzf_error_text, sizeof(mzf_error_text), text);
     mzf_state = (uint8_t)state;
-    mz_sense_set(true);
 }
 
 static void mzf_set_error(const char *text, mzf_playback_state_t state)
@@ -190,7 +196,6 @@ static void mzf_set_error(const char *text, mzf_playback_state_t state)
         mzf_error_text[sizeof(mzf_error_text) - 1U] = '\0';
     }
     mzf_state = (uint8_t)state;
-    mz_sense_set(true);
 }
 
 static void mzf_set_error_from_isr_P(PGM_P text, mzf_playback_state_t state)
@@ -198,7 +203,6 @@ static void mzf_set_error_from_isr_P(PGM_P text, mzf_playback_state_t state)
     flash_text_copy(mzf_error_text, sizeof(mzf_error_text), text);
     mzf_state = (uint8_t)state;
     mz_read_set_fast_from_isr(0U);
-    mz_sense_set_fast(true);
 }
 
 static inline void mzf_read_wave_set_from_isr(uint8_t level)
@@ -251,6 +255,26 @@ static void mzf_timer_start_first(uint16_t ticks)
 
 static void mzf_timer_start_resume(uint16_t ticks)
 {
+    mzf_timer_start_first(ticks);
+}
+
+/* MZ-700 FAST3 has only about 17 us between the nominal 80 us short phase
+   and the patched ROM sample point.  Restarting Timer3 after every READ edge
+   adds the ISR body to every phase.  Once the first phase is running, anchor
+   subsequent compares to the previous compare point so the ISR latency does
+   not accumulate into the generated pulse width. */
+static void mzf_timer_start_phase_from_isr(uint16_t ticks)
+{
+    if (ticks == 0U) ticks = 1U;
+
+    if (mzf_loader_is_mz700_fast3() &&
+        (mzf_stage == MZF_STAGE_TAPE_TURBO_DATA) &&
+        (timer3b_owner_get_from_isr() == TIMER3B_OWNER_MZF))
+    {
+        OCR3B = (uint16_t)(OCR3B + ticks);
+        return;
+    }
+
     mzf_timer_start_first(ticks);
 }
 
@@ -669,12 +693,15 @@ static bool mzf_stage_uses_tape_turbo_timing(void)
 
 static bool mzf_stage_uses_low_first_timing(void)
 {
+    /* Existing MZ-800 IC loaders use their verified LOW-first phase.
+       The hardware-proven MZ-700 FAST3 WAV starts every pulse HIGH-first. */
     return mzf_stage_uses_tape_turbo_timing() && mzf_loader_is_ic_turbo();
 }
 
 static uint16_t mzf_boundary_auto_continue_ms(void)
 {
-    if (((mzf_stage == MZF_STAGE_HEADER) && mzf_loader_is_ic_turbo()) ||
+    if (((mzf_stage == MZF_STAGE_HEADER) &&
+         (mzf_loader_is_ic_turbo() || mzf_loader_is_mz700_fast3())) ||
         ((mzf_stage == MZF_STAGE_DATA) && mzf_loader_is_tape_turbo()))
     {
         if ((mzf_stage == MZF_STAGE_DATA) && mzf_loader_is_tc_turbo())
@@ -694,6 +721,9 @@ static uint16_t mzf_short_high_ticks(void)
         {
             case MZF_LOADER_VARIANT_IC_1_2: return MZF_IC_1_2_SHORT_HIGH_TICKS;
             case MZF_LOADER_VARIANT_IC_1_3: return MZF_IC_1_3_SHORT_HIGH_TICKS;
+            case MZF_LOADER_VARIANT_MZ700_FAST3_LOW:
+            case MZF_LOADER_VARIANT_MZ700_FAST3_HIGH:
+                return MZF_MZ700_3X_SHORT_TICKS;
             case MZF_LOADER_VARIANT_TC_1_2: return MZF_TC_1_2_SHORT_HIGH_TICKS;
             case MZF_LOADER_VARIANT_TC_1_3: return MZF_TC_1_3_SHORT_HIGH_TICKS;
             default: return MZF_IC_1_4_SHORT_HIGH_TICKS;
@@ -710,6 +740,9 @@ static uint16_t mzf_short_low_ticks(void)
         {
             case MZF_LOADER_VARIANT_IC_1_2: return MZF_IC_1_2_SHORT_LOW_TICKS;
             case MZF_LOADER_VARIANT_IC_1_3: return MZF_IC_1_3_SHORT_LOW_TICKS;
+            case MZF_LOADER_VARIANT_MZ700_FAST3_LOW:
+            case MZF_LOADER_VARIANT_MZ700_FAST3_HIGH:
+                return MZF_MZ700_3X_SHORT_TICKS;
             case MZF_LOADER_VARIANT_TC_1_2: return MZF_TC_1_2_SHORT_LOW_TICKS;
             case MZF_LOADER_VARIANT_TC_1_3: return MZF_TC_1_3_SHORT_LOW_TICKS;
             default: return MZF_IC_1_4_SHORT_LOW_TICKS;
@@ -726,6 +759,9 @@ static uint16_t mzf_long_high_ticks(void)
         {
             case MZF_LOADER_VARIANT_IC_1_2: return MZF_IC_1_2_LONG_HIGH_TICKS;
             case MZF_LOADER_VARIANT_IC_1_3: return MZF_IC_1_3_LONG_HIGH_TICKS;
+            case MZF_LOADER_VARIANT_MZ700_FAST3_LOW:
+            case MZF_LOADER_VARIANT_MZ700_FAST3_HIGH:
+                return MZF_MZ700_3X_LONG_TICKS;
             case MZF_LOADER_VARIANT_TC_1_2: return MZF_TC_1_2_LONG_HIGH_TICKS;
             case MZF_LOADER_VARIANT_TC_1_3: return MZF_TC_1_3_LONG_HIGH_TICKS;
             default: return MZF_IC_1_4_LONG_HIGH_TICKS;
@@ -742,6 +778,9 @@ static uint16_t mzf_long_low_ticks(void)
         {
             case MZF_LOADER_VARIANT_IC_1_2: return MZF_IC_1_2_LONG_LOW_TICKS;
             case MZF_LOADER_VARIANT_IC_1_3: return MZF_IC_1_3_LONG_LOW_TICKS;
+            case MZF_LOADER_VARIANT_MZ700_FAST3_LOW:
+            case MZF_LOADER_VARIANT_MZ700_FAST3_HIGH:
+                return MZF_MZ700_3X_LONG_TICKS;
             case MZF_LOADER_VARIANT_TC_1_2: return MZF_TC_1_2_LONG_LOW_TICKS;
             case MZF_LOADER_VARIANT_TC_1_3: return MZF_TC_1_3_LONG_LOW_TICKS;
             default: return MZF_IC_1_4_LONG_LOW_TICKS;
@@ -1078,7 +1117,6 @@ static bool mzf_next_normal_pulse_from_isr(uint16_t *high_ticks,
                 {
                     mzf_stop_timer_from_isr();
                     mz_read_set_fast_from_isr(0U);
-                    mz_sense_set_fast(true);
                     mzf_state = MZF_PLAYBACK_FINISHED;
                     return false;
                 }
@@ -1112,7 +1150,7 @@ static bool mzf_start_next_normal_pulse_from_isr(void)
         mzf_timer_phase_low_first = true;
         mzf_read_wave_set_from_isr(0U);
         mzf_paused_remaining_ticks = low_ticks;
-        mzf_timer_start_first(low_ticks);
+        mzf_timer_start_phase_from_isr(low_ticks);
     }
     else
     {
@@ -1120,7 +1158,7 @@ static bool mzf_start_next_normal_pulse_from_isr(void)
         mzf_timer_phase_low_first = false;
         mzf_read_wave_set_from_isr(1U);
         mzf_paused_remaining_ticks = high_ticks;
-        mzf_timer_start_first(high_ticks);
+        mzf_timer_start_phase_from_isr(high_ticks);
     }
     return true;
 }
@@ -1140,6 +1178,18 @@ static uint16_t mzf_current_high_ticks(void)
 
 static bool mzf_start_normal_output(void)
 {
+    /* The hardware-proven MZ-700 WAV keeps READ low for about 400 ms
+       between the synthetic header and the first FAST3 leader pulse.
+       A real MOTOR low/high cycle can be much shorter, so apply this once
+       when the accelerated payload stage is first started. */
+    if (mzf_loader_is_mz700_fast3() &&
+        (mzf_stage == MZF_STAGE_TAPE_TURBO_DATA) &&
+        (mzf_normal_step == MZF_STEP_BEGIN))
+    {
+        mz_read_set(false);
+        delay(MZF_MZ700_FAST3_START_DELAY_MS);
+    }
+
     ATOMIC_BLOCK(ATOMIC_RESTORESTATE)
     {
         mzf_start_next_normal_pulse_from_isr();
@@ -1196,6 +1246,15 @@ static bool mzf_advance_after_boundary(void)
 {
     if (mzf_stage == MZF_STAGE_HEADER)
     {
+        if (mzf_loader_is_mz700_fast3())
+        {
+            if (!mzf_prepare_tape_turbo_payload())
+            {
+                return false;
+            }
+            mzf_begin_normal_stage(MZF_STAGE_TAPE_TURBO_DATA);
+            return true;
+        }
         if (mzf_loader_is_header_only())
         {
             mzf_stage = MZF_STAGE_ULTRAFAST;
@@ -1270,7 +1329,6 @@ static bool mzf_advance_after_boundary(void)
     }
 
     mzf_state = MZF_PLAYBACK_FINISHED;
-    mz_sense_set(true);
     return true;
 }
 
@@ -1425,9 +1483,15 @@ bool mzf_playback_prepare(const char *path,
                               mzf_file_size, sdcard_file_position()))
     {
         mzf_wave_invert_signal = mzf_loader_is_tc_turbo();
-        mzf_loader_patch_loader_header(mzf_header);
+        if (!mzf_loader_patch_loader_header(mzf_header))
+        {
+            sdcard_file_close();
+            mzf_set_error_P(PSTR("LDR HEADER"), MZF_PLAYBACK_BAD_FILE);
+            return false;
+        }
         if (!mzf_loader_is_header_only() &&
             !mzf_loader_is_ic_turbo() &&
+            !mzf_loader_is_mz700_fast3() &&
             !mzf_prepare_loader_block_data())
         {
             sdcard_file_close();
@@ -1838,7 +1902,7 @@ uint8_t mzf_playback_get_progress_percent(void)
                                                   MZF_HEADER_BYTES);
     total = header_units;
 
-    if (mzf_loader_is_ic_turbo())
+    if (mzf_loader_is_ic_turbo() || mzf_loader_is_mz700_fast3())
     {
         data_units = mzf_progress_stage_total_units(MZF_STAGE_TAPE_TURBO_DATA,
                                                     mzf_original_data_length);
@@ -1913,6 +1977,12 @@ mzf_playback_phase_t mzf_playback_get_progress_phase(void)
 
     if (mzf_stage == MZF_STAGE_TAPE_TURBO_DATA)
     {
+        if (mzf_loader_is_mz700_fast3())
+        {
+            return mzf_loader_is_mz700_fast3_high() ?
+                MZF_PLAYBACK_PHASE_MZ700_FAST3_HIGH :
+                MZF_PLAYBACK_PHASE_MZ700_FAST3_LOW;
+        }
         return mzf_loader_is_tc_turbo() ?
             MZF_PLAYBACK_PHASE_TC_TURBO_DATA :
             MZF_PLAYBACK_PHASE_IC_TURBO_DATA;
@@ -1936,6 +2006,10 @@ mzf_playback_phase_t mzf_playback_get_progress_phase(void)
             return MZF_PLAYBACK_PHASE_ULTRAFAST_LOADER_HIGH;
         case MZF_LOADER_VARIANT_MZ800_HEADER:
             return MZF_PLAYBACK_PHASE_ULTRAFAST_HEADER;
+        case MZF_LOADER_VARIANT_MZ700_FAST3_LOW:
+            return MZF_PLAYBACK_PHASE_MZ700_FAST3_LOW;
+        case MZF_LOADER_VARIANT_MZ700_FAST3_HIGH:
+            return MZF_PLAYBACK_PHASE_MZ700_FAST3_HIGH;
         default:
             return MZF_PLAYBACK_PHASE_NORMAL;
     }
@@ -1972,7 +2046,7 @@ bool mzf_playback_timer3_compb_from_isr(void)
         mzf_timer_phase_high = false;
         low_ticks = mzf_current_low_ticks();
         mzf_read_wave_set_from_isr(0U);
-        mzf_timer_start_resume(low_ticks);
+        mzf_timer_start_phase_from_isr(low_ticks);
         return true;
     }
 
@@ -1980,7 +2054,7 @@ bool mzf_playback_timer3_compb_from_isr(void)
     {
         mzf_timer_phase_low_first = false;
         mzf_read_wave_set_from_isr(1U);
-        mzf_timer_start_resume(mzf_current_high_ticks());
+        mzf_timer_start_phase_from_isr(mzf_current_high_ticks());
         return true;
     }
 

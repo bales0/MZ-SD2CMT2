@@ -39,7 +39,6 @@ static bool play_controller_start_engine(void)
     if (!play_engine_start())
     {
         session_state = PLAY_CONTROLLER_STATE_ERROR;
-        mz_sense_set(true);
         return false;
     }
     session_state = PLAY_CONTROLLER_STATE_PLAYING;
@@ -57,7 +56,6 @@ static bool play_controller_pause_engine(void)
     if (!play_engine_pause())
     {
         session_state = PLAY_CONTROLLER_STATE_ERROR;
-        mz_sense_set(true);
         return false;
     }
     if (play_engine_get_state() == PLAY_ENGINE_STATE_READY)
@@ -77,7 +75,6 @@ static bool play_controller_resume_engine(void)
     if (!play_engine_resume())
     {
         session_state = PLAY_CONTROLLER_STATE_ERROR;
-        mz_sense_set(true);
         return false;
     }
     session_state = PLAY_CONTROLLER_STATE_PLAYING;

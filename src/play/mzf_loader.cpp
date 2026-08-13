@@ -9,6 +9,7 @@
 #include "../drivers/mzio.h"
 #include "../drivers/sdcard.h"
 #include "../streams/wav_sample_stream.h"
+#include "mz700_fast3.h"
 
 #define MZF_HEADER_FILE_TYPE_OFFSET 0x00U
 #define MZF_HEADER_DATA_LENGTH_OFFSET 0x12U
@@ -235,6 +236,7 @@ typedef struct
     uint16_t data_load_address;
     uint16_t exec_address;
     uint8_t file_type;
+    uint8_t original_name[MZ700_FAST3_NAME_BYTES];
     uint8_t workspace_restore[MZF_LOADER_WORKSPACE_RESTORE_BYTES];
     uint32_t data_offset;
     uint32_t transferred;
@@ -544,6 +546,7 @@ bool mzf_loader_prepare(file_format_t format,
     }
 
     context.file_type = header[MZF_HEADER_FILE_TYPE_OFFSET];
+    memcpy(context.original_name, header + 1U, MZ700_FAST3_NAME_BYTES);
     context.data_length = read_le16(header + MZF_HEADER_DATA_LENGTH_OFFSET);
     context.data_load_address = read_le16(header + MZF_HEADER_LOAD_ADDRESS_OFFSET);
     context.exec_address = read_le16(header + MZF_HEADER_EXEC_ADDRESS_OFFSET);
@@ -568,7 +571,45 @@ bool mzf_loader_prepare(file_format_t format,
     {
         return false;
     }
-    if (mode == LOADER_MODE_UL_MZ800)
+    if (mode == LOADER_MODE_MZ700_3X)
+    {
+        const uint8_t runtime_size =
+            mz700_fast3_runtime_size(context.original_name);
+
+        if ((runtime_size == 0U) ||
+            (runtime_size > MZ700_FAST3_RUNTIME_CAPACITY))
+        {
+            return false;
+        }
+
+        if (!ranges_overlap(MZ700_FAST3_RUNTIME_LOW_ADDR, runtime_size,
+                            context.data_load_address, context.data_length) &&
+            mz700_fast3_stage_is_encodable(MZ700_FAST3_RUNTIME_LOW_ADDR,
+                                           runtime_size))
+        {
+            context.variant = MZF_LOADER_VARIANT_MZ700_FAST3_LOW;
+            context.loader_address = MZ700_FAST3_RUNTIME_LOW_ADDR;
+        }
+        else if (!ranges_overlap(MZ700_FAST3_RUNTIME_HIGH_ADDR, runtime_size,
+                                 context.data_load_address,
+                                 context.data_length) &&
+                 mz700_fast3_stage_is_encodable(MZ700_FAST3_RUNTIME_HIGH_ADDR,
+                                                runtime_size))
+        {
+            context.variant = MZF_LOADER_VARIANT_MZ700_FAST3_HIGH;
+            context.loader_address = MZ700_FAST3_RUNTIME_HIGH_ADDR;
+        }
+        else
+        {
+            /* Safe fallback: caller continues with ordinary 1x playback. */
+            return false;
+        }
+
+        context.loader_size = runtime_size;
+        context.active = true;
+        return true;
+    }
+    else if (mode == LOADER_MODE_UL_MZ800)
     {
         /*
            MZ800 HEADER ONLY AUTO LOW/HIGH:
@@ -648,7 +689,8 @@ bool mzf_loader_is_active(void)
 bool mzf_loader_is_ul_active(void)
 {
     return context.active && !is_ic_variant(context.variant) &&
-           !is_tc_variant(context.variant);
+           !is_tc_variant(context.variant) &&
+           !mzf_loader_is_mz700_fast3();
 }
 
 bool mzf_loader_is_header_only(void)
@@ -664,6 +706,19 @@ bool mzf_loader_is_mz800_header_high(void)
            context.mz800_header_high;
 }
 
+bool mzf_loader_is_mz700_fast3(void)
+{
+    return context.active &&
+           ((context.variant == MZF_LOADER_VARIANT_MZ700_FAST3_LOW) ||
+            (context.variant == MZF_LOADER_VARIANT_MZ700_FAST3_HIGH));
+}
+
+bool mzf_loader_is_mz700_fast3_high(void)
+{
+    return context.active &&
+           (context.variant == MZF_LOADER_VARIANT_MZ700_FAST3_HIGH);
+}
+
 bool mzf_loader_is_ic_turbo(void)
 {
     return context.active && is_ic_variant(context.variant);
@@ -677,7 +732,8 @@ bool mzf_loader_is_tc_turbo(void)
 bool mzf_loader_is_tape_turbo(void)
 {
     return context.active &&
-           (is_ic_variant(context.variant) || is_tc_variant(context.variant));
+           (is_ic_variant(context.variant) || is_tc_variant(context.variant) ||
+            mzf_loader_is_mz700_fast3());
 }
 
 mzf_loader_variant_t mzf_loader_get_variant(void)
@@ -690,11 +746,21 @@ uint16_t mzf_loader_get_loader_size(void)
     return context.active ? context.loader_size : 0U;
 }
 
-void mzf_loader_patch_loader_header(uint8_t *header)
+bool mzf_loader_patch_loader_header(uint8_t *header)
 {
     if ((header == NULL) || !context.active)
     {
-        return;
+        return false;
+    }
+
+    if (mzf_loader_is_mz700_fast3())
+    {
+        return mz700_fast3_build_header(header, context.loader_address,
+                                        (uint8_t)context.loader_size,
+                                        context.data_length,
+                                        context.data_load_address,
+                                        context.exec_address,
+                                        context.original_name);
     }
 
     if ((context.variant == MZF_LOADER_VARIANT_MZ800_HEADER) ||
@@ -722,7 +788,7 @@ void mzf_loader_patch_loader_header(uint8_t *header)
                context.workspace_restore, 6U);
         (void)mzf_loader_build_loader(header + MZF_LOADER_MZ800_HEADER_OFFSET,
                                      MZF_LOADER_MZ800_HEADER_CAPACITY);
-        return;
+        return true;
     }
 
     if (is_tc_variant(context.variant))
@@ -735,12 +801,13 @@ void mzf_loader_patch_loader_header(uint8_t *header)
             header[MZF_LOADER_TC_HEADER_TAG_OFFSET + i] =
                 (uint8_t)pgm_read_byte(tc_header_tag_P + i);
         }
-        return;
+        return true;
     }
 
     write_le16(header + MZF_HEADER_DATA_LENGTH_OFFSET, context.loader_size);
     write_le16(header + MZF_HEADER_LOAD_ADDRESS_OFFSET, context.loader_address);
     write_le16(header + MZF_HEADER_EXEC_ADDRESS_OFFSET, context.loader_address);
+    return true;
 }
 
 uint16_t mzf_loader_build_loader(uint8_t *destination, uint16_t capacity)

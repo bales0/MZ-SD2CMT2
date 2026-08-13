@@ -19,6 +19,7 @@ typedef enum
     MENU_LOADER_AUTO,
     MENU_LOADER_UL,
     MENU_LOADER_UL_MZ800,
+    MENU_LOADER_MZ700_3X,
     MENU_LOADER_IC,
     MENU_LOADER_TC,
     MENU_LOADER_COUNT
@@ -47,6 +48,7 @@ static const char text_off[] PROGMEM = " OFF";
 static const char text_auto[] PROGMEM = " AUTO";
 static const char text_ul[] PROGMEM = " UL";
 static const char text_ul_mz800[] PROGMEM = " UL MZ800";
+static const char text_mz700_3x[] PROGMEM = " MZ700 3X";
 static const char text_ic[] PROGMEM = " IC";
 static const char text_tc[] PROGMEM = " TC";
 static const char text_speed_none[] PROGMEM = " --";
@@ -96,6 +98,7 @@ static PGM_P loader_label_P(void)
         case MENU_LOADER_AUTO: return text_auto;
         case MENU_LOADER_UL: return text_ul;
         case MENU_LOADER_UL_MZ800: return text_ul_mz800;
+        case MENU_LOADER_MZ700_3X: return text_mz700_3x;
         case MENU_LOADER_IC: return text_ic;
         case MENU_LOADER_TC: return text_tc;
         default: return text_off;
@@ -231,6 +234,8 @@ loader_mode_t menu_get_loader_mode(void)
             return LOADER_MODE_UL;
         case MENU_LOADER_UL_MZ800:
             return LOADER_MODE_UL_MZ800;
+        case MENU_LOADER_MZ700_3X:
+            return LOADER_MODE_MZ700_3X;
         case MENU_LOADER_IC:
             if (loader_speed == MENU_SPEED_1_2) return LOADER_MODE_IC_1_2;
             if (loader_speed == MENU_SPEED_1_3) return LOADER_MODE_IC_1_3;

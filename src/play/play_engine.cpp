@@ -99,6 +99,9 @@ static void play_engine_clear_error(void)
 
 static void play_engine_set_error(const char *text)
 {
+    bool release_sense = (engine_state != PLAY_ENGINE_STATE_RUNNING) &&
+                         (engine_state != PLAY_ENGINE_STATE_PAUSED);
+
     if (text == NULL)
     {
         flash_text_copy(engine_error_text, sizeof(engine_error_text), PSTR("PLAY ERROR"));
@@ -110,15 +113,24 @@ static void play_engine_set_error(const char *text)
     }
     play_engine_clock_pause();
     engine_state = PLAY_ENGINE_STATE_ERROR;
-    mz_sense_set(true);
+    if (release_sense || mzf_playback_is_ul_loader_active())
+    {
+        mz_sense_set(true);
+    }
 }
 
 static void play_engine_set_error_P(PGM_P text)
 {
+    bool release_sense = (engine_state != PLAY_ENGINE_STATE_RUNNING) &&
+                         (engine_state != PLAY_ENGINE_STATE_PAUSED);
+
     flash_text_copy(engine_error_text, sizeof(engine_error_text), text);
     play_engine_clock_pause();
     engine_state = PLAY_ENGINE_STATE_ERROR;
-    mz_sense_set(true);
+    if (release_sense || mzf_playback_is_ul_loader_active())
+    {
+        mz_sense_set(true);
+    }
 }
 
 static PGM_P play_engine_driver_error_text_P(wav_playback_driver_state_t state)
@@ -409,7 +421,6 @@ void play_engine_service(void)
         if (driver_state == WAV_PLAYBACK_DRIVER_FINISHED)
         {
             wav_playback_driver_stop();
-            mz_sense_set(true);
             play_engine_clock_finish();
             source_reprepare_required = true;
             engine_state = PLAY_ENGINE_STATE_READY;
@@ -508,6 +519,10 @@ play_progress_phase_t play_engine_get_progress_phase(void)
             return PLAY_PROGRESS_PHASE_TC_TURBO_LOADER;
         case MZF_PLAYBACK_PHASE_TC_TURBO_DATA:
             return PLAY_PROGRESS_PHASE_TC_TURBO_DATA;
+        case MZF_PLAYBACK_PHASE_MZ700_FAST3_LOW:
+            return PLAY_PROGRESS_PHASE_MZ700_FAST3_LOW;
+        case MZF_PLAYBACK_PHASE_MZ700_FAST3_HIGH:
+            return PLAY_PROGRESS_PHASE_MZ700_FAST3_HIGH;
         case MZF_PLAYBACK_PHASE_ULTRAFAST_DATA:
             return PLAY_PROGRESS_PHASE_ULTRAFAST_DATA;
         default:

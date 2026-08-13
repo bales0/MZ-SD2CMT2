@@ -4,3 +4,8 @@ generated/
 .gitignore
 platformio.exe
 TEST/
+!TEST/
+TEST/*
+!TEST/MZ700/
+TEST/MZ700/*
+!TEST/MZ700/verify_mz700_fast3.ps1

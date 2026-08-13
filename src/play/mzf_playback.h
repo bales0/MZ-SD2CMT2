@@ -29,10 +29,12 @@ typedef enum
     MZF_PLAYBACK_PHASE_IC_TURBO_DATA,
     MZF_PLAYBACK_PHASE_TC_TURBO_LOADER,
     MZF_PLAYBACK_PHASE_TC_TURBO_DATA,
+    MZF_PLAYBACK_PHASE_MZ700_FAST3_LOW,
+    MZF_PLAYBACK_PHASE_MZ700_FAST3_HIGH,
     MZF_PLAYBACK_PHASE_ULTRAFAST_DATA
 } mzf_playback_phase_t;
 
-/* Streams MZF/MZT/M12 with native MZ-800 monitor PWM framing only. */
+/* Streams Sharp tape images with native framing and selected loader timing. */
 void mzf_playback_init(void);
 bool mzf_playback_prepare(const char *path, file_format_t format,
                           loader_mode_t loader_mode);
