@@ -54,7 +54,7 @@ bool mzf_playback_is_ul_loader_active(void);
 /* Nominal monitor PWM duration, excluding MOTOR pause gaps between blocks. */
 uint32_t mzf_playback_get_total_duration_ms(void);
 
-/* Internal Timer3 compare-B dispatch hook, called only when MZF owns Timer3B. */
+/* Internal OC3B PWM phase hook, called only when MZF owns Timer3. */
 bool mzf_playback_timer3_compb_from_isr(void);
 
 #endif

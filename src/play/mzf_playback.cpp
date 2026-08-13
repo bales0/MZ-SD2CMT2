@@ -13,8 +13,8 @@
 #include "../drivers/sdcard.h"
 #include "../streams/wav_sample_stream.h"
 
-#if !defined(TIMER3_COMPB_vect)
-#error "MZF playback requires Timer3 compare-B on ATmega2560"
+#if !defined(TIMER3_COMPB_vect) || !defined(TIMER3_OVF_vect)
+#error "MZF playback requires Timer3 compare-B and overflow on ATmega2560"
 #endif
 
 /*
@@ -129,6 +129,13 @@ typedef enum
     MZF_STEP_BOUNDARY
 } mzf_normal_step_t;
 
+typedef enum
+{
+    MZF_PWM_TERMINAL_NONE = 0,
+    MZF_PWM_TERMINAL_BOUNDARY,
+    MZF_PWM_TERMINAL_FINISHED
+} mzf_pwm_terminal_t;
+
 static volatile uint8_t mzf_state = MZF_PLAYBACK_STOPPED;
 static char mzf_error_text[17];
 
@@ -168,11 +175,16 @@ static bool mzf_normal_header_preamble = true;
 /* Written by Timer3 ISR and read in foreground. */
 static volatile bool mzf_boundary_waiting = false;
 static volatile uint8_t mzf_motor_low_seen = 0U;
-static bool mzf_timer_phase_high = false;
-static bool mzf_timer_phase_low_first = false;
-static bool mzf_current_pulse_is_long = false;
 static bool mzf_paused_mid_pulse = false;
-static uint16_t mzf_paused_remaining_ticks = 0U;
+static bool mzf_pwm_low_first = false;
+static bool mzf_pwm_bootstrap_pending = false;
+static bool mzf_pwm_stop_pending = false;
+static bool mzf_pwm_next_valid = false;
+static bool mzf_pwm_paused_com_connected = false;
+static uint8_t mzf_pwm_paused_resume_level = 0U;
+static uint16_t mzf_pwm_current_compare_ticks = 1U;
+static uint16_t mzf_pwm_next_compare_ticks = 1U;
+static volatile uint8_t mzf_pwm_terminal_pending = MZF_PWM_TERMINAL_NONE;
 
 /* Foreground-only fallback timer for a missing/short MOTOR boundary. */
 static bool mzf_boundary_auto_timer_armed = false;
@@ -205,35 +217,37 @@ static void mzf_set_error_from_isr_P(PGM_P text, mzf_playback_state_t state)
     mz_read_set_fast_from_isr(0U);
 }
 
-static inline void mzf_read_wave_set_from_isr(uint8_t level)
-{
-    mz_read_set_fast_from_isr(level ^ (mzf_wave_invert_signal ? 1U : 0U));
-}
-
 static void mzf_stop_timer_from_isr(void)
 {
-    TIMSK3 &= (uint8_t)~_BV(OCIE3B);
+    TIMSK3 &= (uint8_t)~(_BV(OCIE3B) | _BV(TOIE3));
     TCCR3A = 0U;
     TCCR3B = 0U;
-    TIFR3 = _BV(OCF3B);
+    TIFR3 = (uint8_t)(_BV(OCF3B) | _BV(TOV3));
     if (timer3b_owner_get_from_isr() == TIMER3B_OWNER_MZF)
     {
         timer3b_owner_set_from_isr(TIMER3B_OWNER_NONE);
     }
+    mzf_pwm_bootstrap_pending = false;
+    mzf_pwm_stop_pending = false;
+    mzf_pwm_next_valid = false;
+    mz_read_set_fast_from_isr(0U);
 }
 
 static void mzf_stop_timer_from_foreground(bool force_low)
 {
     ATOMIC_BLOCK(ATOMIC_RESTORESTATE)
     {
-        TIMSK3 &= (uint8_t)~_BV(OCIE3B);
+        TIMSK3 &= (uint8_t)~(_BV(OCIE3B) | _BV(TOIE3));
         TCCR3A = 0U;
         TCCR3B = 0U;
-        TIFR3 = _BV(OCF3B);
+        TIFR3 = (uint8_t)(_BV(OCF3B) | _BV(TOV3));
         if (timer3b_owner_get_from_isr() == TIMER3B_OWNER_MZF)
         {
             timer3b_owner_set_from_isr(TIMER3B_OWNER_NONE);
         }
+        mzf_pwm_bootstrap_pending = false;
+        mzf_pwm_stop_pending = false;
+        mzf_pwm_next_valid = false;
     }
     if (force_low)
     {
@@ -241,41 +255,147 @@ static void mzf_stop_timer_from_foreground(bool force_low)
     }
 }
 
-static void mzf_timer_start_first(uint16_t ticks)
+static uint16_t mzf_pwm_compare_ticks(uint16_t high_ticks,
+                                      uint16_t low_ticks)
 {
-    if (ticks == 0U) ticks = 1U;
-    TCNT3 = 0U;
+    uint16_t compare = mzf_pwm_low_first ? low_ticks : high_ticks;
+    return (compare == 0U) ? 1U : compare;
+}
+
+static void mzf_pwm_write_next_from_isr(uint16_t high_ticks,
+                                        uint16_t low_ticks)
+{
+    uint16_t total_ticks = (uint16_t)(high_ticks + low_ticks);
+    uint16_t compare_ticks = mzf_pwm_compare_ticks(high_ticks, low_ticks);
+
+    if (total_ticks < 2U) total_ticks = 2U;
+    OCR3A = (uint16_t)(total_ticks - 1U);
+    OCR3B = compare_ticks;
+    mzf_pwm_next_compare_ticks = compare_ticks;
+    mzf_pwm_next_valid = true;
+}
+
+/*
+    READ is Arduino pin 2 = PE4/OC3B on the ATmega2560.  Fast-PWM mode 15 uses
+    OCR3A as the double-buffered period and OCR3B as the double-buffered phase
+    boundary.  Both physical READ edges are therefore produced by Timer3;
+    software only prepares a later complete pulse.
+*/
+static void mzf_pwm_start_first_from_isr(uint16_t high_ticks,
+                                         uint16_t low_ticks,
+                                         bool physical_low_first)
+{
+    uint16_t total_ticks = (uint16_t)(high_ticks + low_ticks);
+    uint8_t com_bits;
+
+    if (total_ticks < 2U) total_ticks = 2U;
+    mzf_pwm_low_first = physical_low_first;
+    mzf_pwm_current_compare_ticks = mzf_pwm_compare_ticks(high_ticks, low_ticks);
+    mzf_pwm_next_compare_ticks = 1U;
+    mzf_pwm_next_valid = false;
+    mzf_pwm_bootstrap_pending = true;
+    mzf_pwm_stop_pending = false;
+    mzf_pwm_terminal_pending = MZF_PWM_TERMINAL_NONE;
+
+    TIMSK3 &= (uint8_t)~(_BV(OCIE3B) | _BV(TOIE3));
     TCCR3A = 0U;
-    TCCR3B = _BV(CS30);
-    TIFR3 = _BV(OCF3B);
-    OCR3B = ticks;
+    TCCR3B = 0U;
+    OCR3A = (uint16_t)(total_ticks - 1U);
+    OCR3B = mzf_pwm_current_compare_ticks;
+    /* Start at TOP so the first timer clock performs a real BOTTOM action
+       and establishes the OC3B start level before the measured phase. */
+    TCNT3 = OCR3A;
+    TIFR3 = (uint8_t)(_BV(OCF3B) | _BV(TOV3));
+
+    mz_read_set_fast_from_isr(physical_low_first ? 0U : 1U);
+    com_bits = (uint8_t)(_BV(COM3B1) |
+                         (physical_low_first ? _BV(COM3B0) : 0U));
     timer3b_owner_set_from_isr(TIMER3B_OWNER_MZF);
+    TCCR3A = (uint8_t)(com_bits | _BV(WGM31) | _BV(WGM30));
     TIMSK3 |= _BV(OCIE3B);
+    TCCR3B = (uint8_t)(_BV(WGM33) | _BV(WGM32) | _BV(CS30));
 }
 
-static void mzf_timer_start_resume(uint16_t ticks)
+static void mzf_pwm_disconnect_output_from_isr(void)
 {
-    mzf_timer_start_first(ticks);
+    TCCR3A &= (uint8_t)~(_BV(COM3B1) | _BV(COM3B0));
+    TIMSK3 &= (uint8_t)~_BV(OCIE3B);
 }
 
-/* MZ-700 FAST3 has only about 17 us between the nominal 80 us short phase
-   and the patched ROM sample point.  Restarting Timer3 after every READ edge
-   adds the ISR body to every phase.  Once the first phase is running, anchor
-   subsequent compares to the previous compare point so the ISR latency does
-   not accumulate into the generated pulse width. */
-static void mzf_timer_start_phase_from_isr(uint16_t ticks)
+static void mzf_pwm_arm_terminal_from_isr(void)
 {
-    if (ticks == 0U) ticks = 1U;
+    mzf_pwm_stop_pending = true;
+    TIMSK3 |= (uint8_t)(_BV(OCIE3B) | _BV(TOIE3));
+}
 
-    if (mzf_loader_is_mz700_fast3() &&
-        (mzf_stage == MZF_STAGE_TAPE_TURBO_DATA) &&
-        (timer3b_owner_get_from_isr() == TIMER3B_OWNER_MZF))
+static void mzf_pwm_finish_terminal_from_isr(void)
+{
+    uint8_t terminal = mzf_pwm_terminal_pending;
+
+    mzf_pwm_terminal_pending = MZF_PWM_TERMINAL_NONE;
+    mzf_stop_timer_from_isr();
+    if (terminal == MZF_PWM_TERMINAL_BOUNDARY)
     {
-        OCR3B = (uint16_t)(OCR3B + ticks);
-        return;
+        mzf_boundary_waiting = true;
     }
+    else if (terminal == MZF_PWM_TERMINAL_FINISHED)
+    {
+        mzf_state = MZF_PLAYBACK_FINISHED;
+    }
+}
 
-    mzf_timer_start_first(ticks);
+static void mzf_pwm_pause_from_foreground(void)
+{
+    uint16_t counter;
+    bool first_phase;
+
+    ATOMIC_BLOCK(ATOMIC_RESTORESTATE)
+    {
+        counter = TCNT3;
+        first_phase = counter < mzf_pwm_current_compare_ticks;
+        mzf_pwm_paused_resume_level = mzf_pwm_low_first ?
+            (first_phase ? 0U : 1U) : (first_phase ? 1U : 0U);
+        mzf_pwm_paused_com_connected =
+            (TCCR3A & _BV(COM3B1)) != 0U;
+
+        TIMSK3 &= (uint8_t)~(_BV(OCIE3B) | _BV(TOIE3));
+        TCCR3B &= (uint8_t)~(_BV(CS32) | _BV(CS31) | _BV(CS30));
+        TCCR3A &= (uint8_t)~(_BV(COM3B1) | _BV(COM3B0));
+        TIFR3 = (uint8_t)(_BV(OCF3B) | _BV(TOV3));
+        mzf_paused_mid_pulse = true;
+        mzf_state = MZF_PLAYBACK_PAUSED;
+    }
+    mz_read_set_fast(false);
+}
+
+static void mzf_pwm_resume_from_foreground(void)
+{
+    uint8_t com_bits = 0U;
+
+    mz_read_set_fast(mzf_pwm_paused_resume_level != 0U);
+    ATOMIC_BLOCK(ATOMIC_RESTORESTATE)
+    {
+        if (mzf_pwm_paused_com_connected)
+        {
+            com_bits = (uint8_t)(_BV(COM3B1) |
+                       (mzf_pwm_low_first ? _BV(COM3B0) : 0U));
+        }
+
+        timer3b_owner_set_from_isr(TIMER3B_OWNER_MZF);
+        TIFR3 = (uint8_t)(_BV(OCF3B) | _BV(TOV3));
+        TCCR3A = (uint8_t)(com_bits | _BV(WGM31) | _BV(WGM30));
+        TIMSK3 &= (uint8_t)~(_BV(OCIE3B) | _BV(TOIE3));
+        if (mzf_pwm_paused_com_connected)
+        {
+            TIMSK3 |= _BV(OCIE3B);
+        }
+        if (!mzf_pwm_bootstrap_pending || mzf_pwm_stop_pending)
+        {
+            TIMSK3 |= _BV(TOIE3);
+        }
+        TCCR3B = (uint8_t)(_BV(WGM33) | _BV(WGM32) | _BV(CS30));
+        mzf_paused_mid_pulse = false;
+    }
 }
 
 static uint16_t mzf_fifo_used_snapshot(void)
@@ -884,9 +1004,10 @@ static void mzf_begin_normal_stage(mzf_stage_t stage)
     mzf_boundary_auto_timer_armed = false;
     mzf_boundary_auto_start_ms = 0U;
     mzf_paused_mid_pulse = false;
-    mzf_timer_phase_high = false;
-    mzf_timer_phase_low_first = false;
-    mzf_current_pulse_is_long = false;
+    mzf_pwm_bootstrap_pending = false;
+    mzf_pwm_stop_pending = false;
+    mzf_pwm_next_valid = false;
+    mzf_pwm_terminal_pending = MZF_PWM_TERMINAL_NONE;
 
     if (stage == MZF_STAGE_HEADER)
     {
@@ -1105,9 +1226,7 @@ static bool mzf_next_normal_pulse_from_isr(uint16_t *high_ticks,
                 */
                 if ((mzf_stage == MZF_STAGE_DATA) && mzf_loader_is_ul_active())
                 {
-                    mzf_boundary_waiting = true;
-                    mzf_stop_timer_from_isr();
-                    mz_read_set_fast_from_isr(0U);
+                    mzf_pwm_terminal_pending = MZF_PWM_TERMINAL_BOUNDARY;
                     return false;
                 }
 
@@ -1115,15 +1234,11 @@ static bool mzf_next_normal_pulse_from_isr(uint16_t *high_ticks,
                     ((mzf_stage == MZF_STAGE_DATA) &&
                      (mzf_record_data_file_end >= mzf_file_size)))
                 {
-                    mzf_stop_timer_from_isr();
-                    mz_read_set_fast_from_isr(0U);
-                    mzf_state = MZF_PLAYBACK_FINISHED;
+                    mzf_pwm_terminal_pending = MZF_PWM_TERMINAL_FINISHED;
                     return false;
                 }
 
-                mzf_boundary_waiting = true;
-                mzf_stop_timer_from_isr();
-                mzf_read_wave_set_from_isr(0U);
+                mzf_pwm_terminal_pending = MZF_PWM_TERMINAL_BOUNDARY;
                 return false;
 
             default:
@@ -1133,7 +1248,7 @@ static bool mzf_next_normal_pulse_from_isr(uint16_t *high_ticks,
     }
 }
 
-static bool mzf_start_next_normal_pulse_from_isr(void)
+static bool mzf_queue_next_pwm_pulse_from_isr(void)
 {
     uint16_t high_ticks;
     uint16_t low_ticks;
@@ -1143,41 +1258,20 @@ static bool mzf_start_next_normal_pulse_from_isr(void)
         return false;
     }
 
-    mzf_current_pulse_is_long = (high_ticks == mzf_long_high_ticks());
-    if (mzf_stage_uses_low_first_timing())
-    {
-        mzf_timer_phase_high = false;
-        mzf_timer_phase_low_first = true;
-        mzf_read_wave_set_from_isr(0U);
-        mzf_paused_remaining_ticks = low_ticks;
-        mzf_timer_start_phase_from_isr(low_ticks);
-    }
-    else
-    {
-        mzf_timer_phase_high = true;
-        mzf_timer_phase_low_first = false;
-        mzf_read_wave_set_from_isr(1U);
-        mzf_paused_remaining_ticks = high_ticks;
-        mzf_timer_start_phase_from_isr(high_ticks);
-    }
+    mzf_pwm_write_next_from_isr(high_ticks, low_ticks);
     return true;
 }
 
-/* Low ticks are determined from the current high/short-or-long pulse class. */
-static uint16_t mzf_current_low_ticks(void)
+static bool mzf_physical_low_first(void)
 {
-    return mzf_current_pulse_is_long ?
-        mzf_long_low_ticks() : mzf_short_low_ticks();
-}
-
-static uint16_t mzf_current_high_ticks(void)
-{
-    return mzf_current_pulse_is_long ?
-        mzf_long_high_ticks() : mzf_short_high_ticks();
+    return mzf_stage_uses_low_first_timing() != mzf_wave_invert_signal;
 }
 
 static bool mzf_start_normal_output(void)
 {
+    uint16_t high_ticks;
+    uint16_t low_ticks;
+
     /* The hardware-proven MZ-700 WAV keeps READ low for about 400 ms
        between the synthetic header and the first FAST3 leader pulse.
        A real MOTOR low/high cycle can be much shorter, so apply this once
@@ -1192,7 +1286,11 @@ static bool mzf_start_normal_output(void)
 
     ATOMIC_BLOCK(ATOMIC_RESTORESTATE)
     {
-        mzf_start_next_normal_pulse_from_isr();
+        if (mzf_next_normal_pulse_from_isr(&high_ticks, &low_ticks))
+        {
+            mzf_pwm_start_first_from_isr(high_ticks, low_ticks,
+                                         mzf_physical_low_first());
+        }
     }
     return (mzf_state == MZF_PLAYBACK_RUNNING) && !mzf_boundary_waiting;
 }
@@ -1431,11 +1529,16 @@ void mzf_playback_init(void)
     mzf_motor_low_seen = 0U;
     mzf_boundary_auto_timer_armed = false;
     mzf_boundary_auto_start_ms = 0U;
-    mzf_timer_phase_high = false;
-    mzf_timer_phase_low_first = false;
-    mzf_current_pulse_is_long = false;
     mzf_paused_mid_pulse = false;
-    mzf_paused_remaining_ticks = 0U;
+    mzf_pwm_low_first = false;
+    mzf_pwm_bootstrap_pending = false;
+    mzf_pwm_stop_pending = false;
+    mzf_pwm_next_valid = false;
+    mzf_pwm_paused_com_connected = false;
+    mzf_pwm_paused_resume_level = 0U;
+    mzf_pwm_current_compare_ticks = 1U;
+    mzf_pwm_next_compare_ticks = 1U;
+    mzf_pwm_terminal_pending = MZF_PWM_TERMINAL_NONE;
     mzf_fifo_reset();
     mzf_loader_reset();
 }
@@ -1528,8 +1631,7 @@ bool mzf_playback_start(void)
         /* This low MOTOR belonged to a mid-block pause, not to the next
            header/data boundary. */
         mzf_motor_low_seen = 0U;
-        mzf_paused_mid_pulse = false;
-        mzf_timer_start_resume(mzf_paused_remaining_ticks);
+        mzf_pwm_resume_from_foreground();
         return true;
     }
 
@@ -1543,8 +1645,6 @@ bool mzf_playback_start(void)
 
 bool mzf_playback_pause(void)
 {
-    uint16_t remaining;
-
     if (mzf_state != MZF_PLAYBACK_RUNNING)
     {
         return false;
@@ -1571,18 +1671,7 @@ bool mzf_playback_pause(void)
         return true;
     }
 
-    ATOMIC_BLOCK(ATOMIC_RESTORESTATE)
-    {
-        remaining = (uint16_t)(OCR3B - TCNT3);
-        if (((TIFR3 & _BV(OCF3B)) != 0U) || (remaining == 0U))
-        {
-            remaining = 1U;
-        }
-        mzf_paused_remaining_ticks = remaining;
-        mzf_stop_timer_from_isr();
-        mzf_paused_mid_pulse = true;
-        mzf_state = MZF_PLAYBACK_PAUSED;
-    }
+    mzf_pwm_pause_from_foreground();
     return true;
 }
 
@@ -1602,11 +1691,16 @@ void mzf_playback_stop(void)
     mzf_motor_low_seen = 0U;
     mzf_boundary_auto_timer_armed = false;
     mzf_boundary_auto_start_ms = 0U;
-    mzf_timer_phase_high = false;
-    mzf_timer_phase_low_first = false;
-    mzf_current_pulse_is_long = false;
     mzf_paused_mid_pulse = false;
-    mzf_paused_remaining_ticks = 0U;
+    mzf_pwm_low_first = false;
+    mzf_pwm_bootstrap_pending = false;
+    mzf_pwm_stop_pending = false;
+    mzf_pwm_next_valid = false;
+    mzf_pwm_paused_com_connected = false;
+    mzf_pwm_paused_resume_level = 0U;
+    mzf_pwm_current_compare_ticks = 1U;
+    mzf_pwm_next_compare_ticks = 1U;
+    mzf_pwm_terminal_pending = MZF_PWM_TERMINAL_NONE;
     mzf_file_size = 0UL;
     mzf_total_duration_ms = 0UL;
     mzf_wave_invert_signal = false;
@@ -2020,44 +2114,107 @@ bool mzf_playback_is_ul_loader_active(void)
     return mzf_loader_is_ul_active();
 }
 
-/*
-    Called by the sole TIMER3_COMPB_vect dispatcher in edge_playback.cpp.
-    Called only while the Timer3B owner is MZF.  The shared dispatcher keeps
-    idle MZF state from touching an active LEP/L16 transport.
-*/
+static void mzf_sample_motor_from_isr(void)
+{
+    if (mz_motor_sample_from_isr() == 0U)
+    {
+        mzf_motor_low_seen = 1U;
+    }
+}
+
+/* OC3B has already generated the physical phase edge when this hook runs. */
 bool mzf_playback_timer3_compb_from_isr(void)
 {
-    uint16_t low_ticks;
-
     if (mzf_state != MZF_PLAYBACK_RUNNING)
     {
         return false;
     }
 
-    /* Sample MOTOR at pulse precision: a short low boundary must not be
-       lost between foreground play-controller polls. */
-    if (mz_motor_sample_from_isr() == 0U)
+    mzf_sample_motor_from_isr();
+
+    /* Prime the double buffer during the first pulse.  Every later pulse is
+       prepared at overflow, providing a full PWM period of timing margin. */
+    if (mzf_pwm_bootstrap_pending)
     {
-        mzf_motor_low_seen = 1U;
+        /* Starting at TOP deliberately produced one initial overflow before
+           this first compare.  Discard it before enabling the OVF pipeline. */
+        TIFR3 = _BV(TOV3);
+        mzf_pwm_bootstrap_pending = false;
+        if (mzf_queue_next_pwm_pulse_from_isr())
+        {
+            TIMSK3 |= _BV(TOIE3);
+            return true;
+        }
+
+        if (mzf_pwm_terminal_pending != MZF_PWM_TERMINAL_NONE)
+        {
+            mzf_pwm_arm_terminal_from_isr();
+            mzf_pwm_disconnect_output_from_isr();
+            return true;
+        }
+
+        mzf_stop_timer_from_isr();
+        return false;
     }
 
-    if (mzf_timer_phase_high)
+    /* A terminal pulse must retain its second phase through TOP.  Disconnect
+       OC3B here so BOTTOM cannot start an unwanted repeat before OVF stops. */
+    if (mzf_pwm_stop_pending)
     {
-        mzf_timer_phase_high = false;
-        low_ticks = mzf_current_low_ticks();
-        mzf_read_wave_set_from_isr(0U);
-        mzf_timer_start_phase_from_isr(low_ticks);
-        return true;
+        mzf_pwm_disconnect_output_from_isr();
     }
-
-    if (mzf_timer_phase_low_first)
-    {
-        mzf_timer_phase_low_first = false;
-        mzf_read_wave_set_from_isr(1U);
-        mzf_timer_start_phase_from_isr(mzf_current_high_ticks());
-        return true;
-    }
-
-    (void)mzf_start_next_normal_pulse_from_isr();
     return true;
+}
+
+static bool mzf_playback_timer3_ovf_from_isr(void)
+{
+    if (mzf_state != MZF_PLAYBACK_RUNNING)
+    {
+        mzf_stop_timer_from_isr();
+        return false;
+    }
+
+    mzf_sample_motor_from_isr();
+    if (mzf_pwm_stop_pending)
+    {
+        mzf_pwm_finish_terminal_from_isr();
+        return false;
+    }
+
+    if (!mzf_pwm_next_valid)
+    {
+        mzf_set_error_from_isr_P(PSTR("PWM PIPE"), MZF_PLAYBACK_BAD_FILE);
+        mzf_stop_timer_from_isr();
+        return false;
+    }
+
+    /* The buffered OCR values became active at this BOTTOM. */
+    mzf_pwm_current_compare_ticks = mzf_pwm_next_compare_ticks;
+    mzf_pwm_next_valid = false;
+
+    if (mzf_queue_next_pwm_pulse_from_isr())
+    {
+        return true;
+    }
+
+    if (mzf_pwm_terminal_pending != MZF_PWM_TERMINAL_NONE)
+    {
+        mzf_pwm_arm_terminal_from_isr();
+        return true;
+    }
+
+    mzf_stop_timer_from_isr();
+    return false;
+}
+
+ISR(TIMER3_OVF_vect)
+{
+    if (timer3b_owner_get_from_isr() == TIMER3B_OWNER_MZF)
+    {
+        (void)mzf_playback_timer3_ovf_from_isr();
+        return;
+    }
+
+    TIMSK3 &= (uint8_t)~_BV(TOIE3);
+    TIFR3 = _BV(TOV3);
 }

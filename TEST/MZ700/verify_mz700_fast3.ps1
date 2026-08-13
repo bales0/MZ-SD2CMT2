@@ -127,12 +127,19 @@ Assert-True ($mz700ShortUses -eq 2) `
     'MZ700 FAST3 HIGH/LOW short phases are not symmetric.'
 Assert-True ($mz700LongUses -eq 2) `
     'MZ700 FAST3 HIGH/LOW long phases are not symmetric.'
-Assert-True $playback.Contains('OCR3B = (uint16_t)(OCR3B + ticks);') `
-    'MZ700 FAST3 phases are not anchored to the previous Timer3 compare.'
-Assert-True $playback.Contains('mzf_timer_start_phase_from_isr(low_ticks);') `
-    'MZ700 FAST3 LOW phases still use the latency-adding timer restart.'
-Assert-True $playback.Contains('mzf_timer_start_phase_from_isr(high_ticks);') `
-    'MZ700 FAST3 HIGH phases still use the latency-adding timer restart.'
+Assert-True $playback.Contains('_BV(COM3B1)') `
+    'MZF playback does not connect hardware OC3B to READ.'
+Assert-True ($playback.Contains('_BV(WGM33)') -and
+             $playback.Contains('_BV(WGM32)') -and
+             $playback.Contains('_BV(WGM31)') -and
+             $playback.Contains('_BV(WGM30)')) `
+    'MZF playback does not use Timer3 Fast PWM mode 15.'
+Assert-True $playback.Contains('OCR3A = (uint16_t)(total_ticks - 1U);') `
+    'MZF PWM does not generate each complete pulse from hardware TOP.'
+Assert-True $playback.Contains('mzf_pwm_write_next_from_isr(high_ticks, low_ticks);') `
+    'MZF headers/data/turbo do not share the hardware PWM pulse backend.'
+Assert-True (-not $playback.Contains('mzf_timer_start_phase_from_isr')) `
+    'Legacy software-edge phase scheduling is still present.'
 Assert-True $playback.Contains(
     'return mzf_stage_uses_tape_turbo_timing() && mzf_loader_is_ic_turbo();') `
     'MZ700 FAST3 must remain HIGH-first like the hardware-proven WAV.'
