@@ -38,10 +38,10 @@
 #define MZF_LOADER_MZ800_RELOCATOR_BYTES 14U
 #define MZF_LOADER_MZ700_UL_PREFIX_BYTES 7U
 #define MZF_LOADER_MZ700_UL_LOW_RAM_MAP_BYTES 2U
-#define MZF_LOADER_MZ700_UL_DISPLAY_BYTES 14U
-#define MZF_LOADER_MZ700_UL_STATUS_PREFIX_BYTES 8U
+#define MZF_LOADER_MZ700_UL_DISPLAY_BYTES 20U
+#define MZF_LOADER_MZ700_UL_NAME_BYTES 15U
+#define MZF_LOADER_MZ700_UL_LOW_RAM_NAME_BYTES 13U
 #define MZF_LOADER_MZ700_UL_STATUS_END_BYTES 1U
-#define MZF_LOADER_MZ700_UL_CLEAR_ADDR 0x09DDU
 #define MZF_LOADER_MZ700_UL_CURSOR_ADDR 0x1171U
 #define MZF_LOADER_MZ700_LOW_RAM_END 0x1000U
 #define MZF_LOADER_HIGH_STACK_SAVE_BYTES 4U
@@ -229,17 +229,11 @@ static const uint8_t loader_body_mz800_header_high_exx_P[] PROGMEM =
     0x20U, 0xD4U, 0xC3U
 };
 
-static const uint8_t mz700_ul_status_prefix_P[
-    MZF_LOADER_MZ700_UL_STATUS_PREFIX_BYTES] PROGMEM =
-{
-    'L', 'O', 'A', 'D', 'I', 'N', 'G', ' '
-};
-
 static_assert((MZF_LOADER_MZ700_UL_PREFIX_BYTES +
                MZF_LOADER_MZ700_UL_LOW_RAM_MAP_BYTES +
                MZF_LOADER_MZ700_UL_DISPLAY_BYTES +
                sizeof(loader_body_mz800_header_high_exx_P) + 2U +
-               MZF_LOADER_MZ700_UL_STATUS_PREFIX_BYTES + 11U +
+               MZF_LOADER_MZ700_UL_LOW_RAM_NAME_BYTES +
                MZF_LOADER_MZ700_UL_STATUS_END_BYTES) <=
               MZ700_FAST3_RUNTIME_CAPACITY,
               "MZ700 header-only UL runtime exceeds Description");
@@ -414,8 +408,10 @@ static uint8_t mz700_ul_name_length(void)
     }
 
     /* Keep code plus status within the 104-byte Description workspace.
-       Mapping a payload below $1000 consumes two additional bytes. */
-    const uint8_t maximum = mz700_ul_needs_low_ram_map() ? 11U : 13U;
+       Mapping payloads below $1000 into low RAM costs two name bytes. */
+    const uint8_t maximum = mz700_ul_needs_low_ram_map()
+                                ? MZF_LOADER_MZ700_UL_LOW_RAM_NAME_BYTES
+                                : MZF_LOADER_MZ700_UL_NAME_BYTES;
     if (length > maximum)
     {
         length = maximum;
@@ -440,7 +436,6 @@ static uint8_t mz700_ul_code_size(void)
 static uint8_t mz700_ul_runtime_size(void)
 {
     return (uint8_t)(mz700_ul_code_size() +
-                     MZF_LOADER_MZ700_UL_STATUS_PREFIX_BYTES +
                      mz700_ul_name_length() +
                      MZF_LOADER_MZ700_UL_STATUS_END_BYTES);
 }
@@ -985,19 +980,24 @@ uint16_t mzf_loader_build_loader(uint8_t *destination, uint16_t capacity)
             (uint16_t)(context.loader_address + mz700_ul_code_size());
 
         /* QMSGX prints through PRNT3, so a converted $C6 byte is not a
-           monitor clear command.  Clear the full character/attribute VRAM
-           directly with the verified 1Z-009A fill routine at $09DD.  It
-           returns HL=$D800; L is therefore zero and LD H,L cheaply produces
-           cursor position $0000 for ($1171).  Keep all ROM calls before a
-           possible low-RAM mapping switch. */
+           monitor clear command. Clear $D000-$D7FF without calling an
+           internal ROM address: 1Z-009A has the fill routine at $09DD but
+           1Z-013A moves it to $09D4. Seed one zero byte, propagate it with
+           LDIR, then reuse the resulting BC=$0000 as the cursor position. */
         destination[offset++] = 0x21U;           /* ld hl,$D000 */
         write_le16(destination + offset, 0xD000U);
         offset = (uint16_t)(offset + 2U);
-        destination[offset++] = 0xCDU;           /* call $09DD */
-        write_le16(destination + offset, MZF_LOADER_MZ700_UL_CLEAR_ADDR);
+        destination[offset++] = 0x75U;           /* ld (hl),l: L=$00 */
+        destination[offset++] = 0x11U;           /* ld de,$D001 */
+        write_le16(destination + offset, 0xD001U);
         offset = (uint16_t)(offset + 2U);
-        destination[offset++] = 0x65U;           /* ld h,l -> hl=$0000 */
-        destination[offset++] = 0x22U;           /* ld ($1171),hl */
+        destination[offset++] = 0x01U;           /* ld bc,$07FF */
+        write_le16(destination + offset, 0x07FFU);
+        offset = (uint16_t)(offset + 2U);
+        destination[offset++] = 0xEDU;
+        destination[offset++] = 0xB0U;           /* ldir: BC becomes zero */
+        destination[offset++] = 0xEDU;
+        destination[offset++] = 0x43U;           /* ld ($1171),bc */
         write_le16(destination + offset, MZF_LOADER_MZ700_UL_CURSOR_ADDR);
         offset = (uint16_t)(offset + 2U);
         destination[offset++] = 0x11U;           /* ld de,status */
@@ -1032,16 +1032,10 @@ uint16_t mzf_loader_build_loader(uint8_t *destination, uint16_t capacity)
         write_le16(destination + offset, context.exec_address);
         offset = (uint16_t)(offset + 2U);
 
-        for (uint8_t i = 0U;
-             i < MZF_LOADER_MZ700_UL_STATUS_PREFIX_BYTES; ++i)
-        {
-            destination[offset++] =
-                pgm_read_byte(mz700_ul_status_prefix_P + i);
-        }
         memcpy(destination + offset, context.original_name, name_length);
         offset = (uint16_t)(offset + name_length);
         destination[offset++] = 0x0DU;
-        return offset;
+        return (offset == context.loader_size) ? offset : 0U;
     }
 
     if (context.variant == MZF_LOADER_VARIANT_HIGH)

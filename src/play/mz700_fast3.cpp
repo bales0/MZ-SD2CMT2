@@ -16,7 +16,6 @@
 #define MZ700_FAST3_RUNTIME_SOURCE_ADDR 0x1108U
 #define MZ700_FAST3_DISPLAY_CODE_BYTES 24U
 #define MZ700_FAST3_CORE_BYTES 49U
-#define MZ700_FAST3_STATUS_PREFIX_BYTES 8U
 
 /* Exact 1Z-009A QADCN table at ROM $0A92-$0B91.
    ROM SHA-256: B0D16889AC3E2A80CC3BC9445BC95BC9988DF7B6115124F284850667CF45FF9F */
@@ -38,11 +37,6 @@ static const uint8_t mz700_qadcn_P[256] PROGMEM =
     0x5CU, 0x1FU, 0x5FU, 0x5EU, 0x37U, 0x7BU, 0x7FU, 0x36U, 0x7AU, 0x7EU, 0x33U, 0x4BU, 0x4CU, 0x1DU, 0x6CU, 0x5BU,
     0x78U, 0x41U, 0x35U, 0x34U, 0x74U, 0x30U, 0x38U, 0x75U, 0x39U, 0x4DU, 0x6FU, 0x6EU, 0x32U, 0x77U, 0x76U, 0x72U,
     0x73U, 0x47U, 0x7CU, 0x53U, 0x31U, 0x4EU, 0x6DU, 0x48U, 0x46U, 0x7DU, 0x44U, 0x1BU, 0x58U, 0x79U, 0x42U, 0x60U
-};
-
-static const uint8_t status_prefix_P[MZ700_FAST3_STATUS_PREFIX_BYTES] PROGMEM =
-{
-    'L', 'O', 'A', 'D', 'I', 'N', 'G', ' '
 };
 
 static void write_le16(uint8_t *bytes, uint16_t value)
@@ -67,15 +61,21 @@ static uint8_t trimmed_name_length(const uint8_t *name)
     return length;
 }
 
+static uint8_t displayed_name_length(const uint8_t *name)
+{
+    const uint8_t length = trimmed_name_length(name);
+    return (length != 0U) ? length : 1U;
+}
+
 uint8_t mz700_fast3_runtime_size(const uint8_t *original_name)
 {
     uint8_t name_length;
 
     if (original_name == NULL) return 0U;
-    name_length = trimmed_name_length(original_name);
+    name_length = displayed_name_length(original_name);
     return (uint8_t)(MZ700_FAST3_DISPLAY_CODE_BYTES +
                      MZ700_FAST3_CORE_BYTES +
-                     MZ700_FAST3_STATUS_PREFIX_BYTES + name_length);
+                     name_length);
 }
 
 static bool build_stage(uint16_t runtime_address, uint8_t runtime_size,
@@ -153,11 +153,12 @@ static uint8_t build_status_display(const uint8_t *original_name,
     uint8_t offset = 0U;
     uint8_t name_length = trimmed_name_length(original_name);
 
-    for (uint8_t i = 0U; i < MZ700_FAST3_STATUS_PREFIX_BYTES; ++i)
+    if (name_length == 0U)
     {
-        destination[offset++] = pgm_read_byte(
-            mz700_qadcn_P + pgm_read_byte(status_prefix_P + i));
+        destination[offset++] = pgm_read_byte(mz700_qadcn_P + 0x20U);
+        return offset;
     }
+
     for (uint8_t i = 0U; i < name_length; ++i)
     {
         destination[offset++] = pgm_read_byte(mz700_qadcn_P + original_name[i]);
@@ -173,8 +174,7 @@ static uint8_t build_runtime(uint8_t *destination,
                              const uint8_t *original_name)
 {
     uint8_t offset = 0U;
-    uint8_t status_length = (uint8_t)(MZ700_FAST3_STATUS_PREFIX_BYTES +
-                                      trimmed_name_length(original_name));
+    uint8_t status_length = displayed_name_length(original_name);
     uint16_t status_address = (uint16_t)(runtime_address +
                               MZ700_FAST3_DISPLAY_CODE_BYTES +
                               MZ700_FAST3_CORE_BYTES);
