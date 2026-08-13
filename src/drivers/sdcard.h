@@ -4,10 +4,14 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#define SDCARD_ENTRY_NAME_MAX 64U
+
 typedef struct
 {
-    char name[32];
+    char name[SDCARD_ENTRY_NAME_MAX];
     bool is_dir;
+    /* SdFat returns an empty string when the complete LFN does not fit. */
+    bool name_too_long;
     uint32_t size;
 
     /* Physical order in the directory scan. It is only a stable tie-breaker

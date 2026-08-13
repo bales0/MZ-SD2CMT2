@@ -8,7 +8,7 @@
 
 #define MAX_DIR_ENTRIES 999
 #define BROWSER_PATH_MAX 96
-#define BROWSER_NAME_MAX 32
+#define BROWSER_NAME_MAX SDCARD_ENTRY_NAME_MAX
 #define BROWSER_FULL_PATH_MAX 160
 #define MESSAGE_HOLD_MS 1200
 #define LCD_COLUMNS 16U
@@ -153,7 +153,7 @@ static bool browser_wrap_pause_elapsed(int8_t direction)
 
 static void browser_update_selected_full_path(void)
 {
-    if (current_entry.name[0] == '\0')
+    if (current_entry.name_too_long || (current_entry.name[0] == '\0'))
     {
         selected_full_path[0] = '\0';
         return;
@@ -602,6 +602,11 @@ static browser_action_t browser_select_current(void)
     if (dir_count == 0U)
     {
         set_status_message_P(PSTR("EMPTY DIR"));
+        return BROWSER_ACTION_NONE;
+    }
+    if (current_entry.name_too_long)
+    {
+        set_status_message_P(PSTR("NAME TOO LONG"));
         return BROWSER_ACTION_NONE;
     }
     if (current_entry.is_dir)

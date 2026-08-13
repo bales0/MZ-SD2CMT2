@@ -416,8 +416,12 @@ bool sdcard_read_entry_by_index(const char *path, uint16_t index, sdcard_entry_t
     {
         if (current_index == index)
         {
-            file.getName(entry->name, sizeof(entry->name));
+            entry->name_too_long = (file.getName(entry->name, sizeof(entry->name)) == 0U);
             entry->name[sizeof(entry->name) - 1] = '\0';
+            if (entry->name_too_long)
+            {
+                flash_text_copy(entry->name, sizeof(entry->name), PSTR("NAME TOO LONG"));
+            }
             entry->is_dir = file.isDir();
             entry->size = file.fileSize();
             entry->source_index = current_index;
@@ -462,8 +466,12 @@ static void sdcard_copy_entry_from_file(FsFile *file,
                                         sdcard_entry_t *entry)
 {
     memset(entry, 0, sizeof(sdcard_entry_t));
-    file->getName(entry->name, sizeof(entry->name));
+    entry->name_too_long = (file->getName(entry->name, sizeof(entry->name)) == 0U);
     entry->name[sizeof(entry->name) - 1U] = '\0';
+    if (entry->name_too_long)
+    {
+        flash_text_copy(entry->name, sizeof(entry->name), PSTR("NAME TOO LONG"));
+    }
     entry->is_dir = file->isDir();
     entry->size = file->fileSize();
     entry->source_index = source_index;
