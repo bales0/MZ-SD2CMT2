@@ -194,6 +194,18 @@ Assert-True $playback.Contains('#define MZF_MZ700_FAST3_START_DELAY_MS 400U') `
     'MZ700 FAST3 must preserve the proven 400 ms inter-block LOW gap.'
 Assert-True (-not $playback.Contains('MZF_MZ700_FAST3_FINISH_DELAY_MS')) `
     'A timed FAST3 tail is redundant while READ/SENSE remain low until STOP.'
+foreach ($needle in @(
+    'MZF_MZ800_LONG_GAP_SHORT_PULSES 6344U',
+    'MZF_MZ800_SHORT_GAP_SHORT_PULSES 3172U',
+    'MZF_NORMAL_1_2_LONG_GAP_SHORT_PULSES 11239U',
+    'MZF_NORMAL_1_2_SHORT_GAP_SHORT_PULSES 5620U',
+    'MZF_NORMAL_1_3_LONG_GAP_SHORT_PULSES 15130U',
+    'MZF_NORMAL_1_3_SHORT_GAP_SHORT_PULSES 7565U',
+    'MZF_IC_TURBO_GAP_SHORT_PULSES 2750U',
+    'MZF_TC_1_2_TURBO_GAP_SHORT_PULSES 5620U',
+    'MZF_TC_1_3_TURBO_GAP_SHORT_PULSES 7565U')) {
+    Assert-True $playback.Contains($needle) "Unexpected MZF leader timing: $needle"
+}
 Assert-True $source.Contains('write_le16(destination + offset, 0x0A4BU)') `
     'The FAST3 runtime does not patch $0A4B.'
 Assert-True (-not $source.Contains('0x0512U')) 'Forbidden $0512 patch detected.'
