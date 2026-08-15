@@ -5,7 +5,7 @@
 
 typedef enum
 {
-    LOADER_MODE_OFF = 0,
+    LOADER_MODE_NORMAL_1_1 = 0,
     LOADER_MODE_AUTO,
     LOADER_MODE_UL,
     LOADER_MODE_UL_MZ800,
@@ -16,6 +16,8 @@ typedef enum
     LOADER_MODE_IC_1_2,
     LOADER_MODE_TC_1_3,
     LOADER_MODE_TC_1_2,
+    LOADER_MODE_NORMAL_1_2,
+    LOADER_MODE_NORMAL_1_3,
     LOADER_MODE_COUNT
 } loader_mode_t;
 

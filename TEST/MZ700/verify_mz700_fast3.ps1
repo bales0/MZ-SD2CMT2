@@ -42,13 +42,17 @@ $rom = [IO.File]::ReadAllBytes($romPath)
 Assert-True ($rom.Length -eq 4096) 'The monitor ROM must be exactly 4096 bytes.'
 $qadcn = [byte[]]$rom[0x0A92..0x0B91]
 
-# UL status display uses the public QMSGX vector after directly clearing VRAM
-# with the verified 1Z-009A fill routine at $09DD.
+# UL status display uses public PRNT and QMSGX vectors. PRNT converts its input
+# through QADCN, so source byte $16 is required to invoke CLS control code $C6.
+Assert-True (($rom[0x0012] -eq 0xC3) -and ($rom[0x0013] -eq 0x35) -and
+             ($rom[0x0014] -eq 0x09)) 'ROM $0012 is not JP PRNT ($0935).'
 Assert-True (($rom[0x0018] -eq 0xC3) -and ($rom[0x0019] -eq 0xA1) -and
              ($rom[0x001A] -eq 0x08)) 'ROM $0018 is not JP QMSGX ($08A1).'
-Assert-True (($rom[0x09DD] -eq 0xAF) -and ($rom[0x09DE] -eq 0x01) -and
-             ($rom[0x09DF] -eq 0x00) -and ($rom[0x09E0] -eq 0x08)) `
-    'ROM $09DD is not XOR A / LD BC,$0800 VRAM fill.'
+Assert-True ($qadcn[0x16] -eq 0xC6) 'QADCN source $16 does not map to CLS $C6.'
+Assert-True ($qadcn[0xC6] -ne 0xC6) `
+    'Regression fixture no longer distinguishes source $C6 from control $C6.'
+Assert-True ((Read-Le16 $rom (0x0EAA + 2 * 6)) -eq 0x0E3A) `
+    'ROM control table does not dispatch $C6 to the CLS handler.'
 
 # Ensure the firmware embeds the exact forward QADCN table from this ROM.
 $source = Get-Content -Raw -LiteralPath $sourcePath
@@ -95,14 +99,16 @@ Assert-True $loader.Contains('MZF_LOADER_MZ700_UL_PREFIX_BYTES 7U') `
     'Unexpected MZ700 UL prefix size.'
 Assert-True $loader.Contains('MZF_LOADER_MZ700_UL_LOW_RAM_MAP_BYTES 2U') `
     'Unexpected MZ700 UL low-RAM map size.'
-Assert-True $loader.Contains('MZF_LOADER_MZ700_UL_DISPLAY_BYTES 14U') `
+Assert-True $loader.Contains('MZF_LOADER_MZ700_UL_DISPLAY_BYTES 9U') `
     'Unexpected MZ700 UL display code size.'
-Assert-True $loader.Contains('MZF_LOADER_MZ700_UL_CLEAR_ADDR 0x09DDU') `
-    'MZ700 UL does not use the verified ROM VRAM fill.'
-Assert-True $loader.Contains('MZF_LOADER_MZ700_UL_CURSOR_ADDR 0x1171U') `
-    'MZ700 UL does not reset the monitor cursor.'
-Assert-True $loader.Contains('''L'', ''O'', ''A'', ''D'', ''I'', ''N'', ''G'', '' ''') `
-    'MZ700 UL LOADING prefix is missing.'
+Assert-True $loader.Contains('MZF_LOADER_MZ700_UL_CLS_SOURCE_BYTE 0x16U') `
+    'MZ700 UL does not pass the QADCN source for CLS to PRNT.'
+Assert-True $loader.Contains(
+    'sizeof(loader_body_mz800_high_working_P) + 2U') `
+    'MZ700 UL does not size the proven 59-byte WRITE receiver.'
+Assert-True $loader.Contains(
+    'pgm_read_byte(loader_body_mz800_high_working_P + i)') `
+    'MZ700 UL does not emit the proven WRITE receiver.'
 Assert-True $loader.Contains('MZF_LOADER_VARIANT_MZ700_UL_LOW') `
     'MZ700 UL LOW variant is missing.'
 Assert-True $loader.Contains('MZF_LOADER_VARIANT_MZ700_UL_HIGH') `
@@ -126,13 +132,13 @@ $bombmanLoad = Read-Le16 $bombman 0x14
 $bombmanExec = Read-Le16 $bombman 0x16
 $bombmanName = [Text.Encoding]::ASCII.GetString($bombman, 1, 17).Trim([char]0, [char]13, ' ')
 $bombmanRuntimeSize = 73 + 8 + $bombmanName.Length
-$bombmanUlRuntimeSize = 68 + 14 + 8 + $bombmanName.Length + 1
+$bombmanUlRuntimeSize = 68 + 9 + $bombmanName.Length + 1
 Assert-True ($bombmanName -eq 'BOMBER MAN') 'Unexpected Bombman name.'
 Assert-True ($bombmanSize -eq 0x2010) 'Unexpected Bombman SIZE.'
 Assert-True ($bombmanLoad -eq 0x1200) 'Unexpected Bombman LOAD.'
 Assert-True ($bombmanExec -eq 0x1200) 'Unexpected Bombman EXEC.'
 Assert-True ($bombmanRuntimeSize -eq 91) 'Bombman FAST3 runtime must be 91 bytes.'
-Assert-True ($bombmanUlRuntimeSize -eq 101) 'Bombman MZ700 UL runtime must be 101 bytes.'
+Assert-True ($bombmanUlRuntimeSize -eq 88) 'Bombman MZ700 UL runtime must be 88 bytes.'
 Assert-True (-not (Test-Overlap 0x1108 $bombmanRuntimeSize $bombmanLoad $bombmanSize)) `
     'Bombman should select LOW.'
 Assert-True (-not (Test-Overlap 0x1108 $bombmanUlRuntimeSize $bombmanLoad $bombmanSize)) `

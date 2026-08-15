@@ -17,7 +17,7 @@
 static const char *prepared_full_path = NULL;
 static file_format_t prepared_format = FILE_FORMAT_UNKNOWN;
 static bool prepared_invert_signal = false;
-static loader_mode_t prepared_loader_mode = LOADER_MODE_OFF;
+static loader_mode_t prepared_loader_mode = LOADER_MODE_NORMAL_1_1;
 static play_engine_state_t engine_state = PLAY_ENGINE_STATE_STOPPED;
 static char engine_error_text[PLAY_ENGINE_ERROR_TEXT_MAX];
 
@@ -253,7 +253,7 @@ void play_engine_init(void)
     prepared_full_path = NULL;
     prepared_format = FILE_FORMAT_UNKNOWN;
     prepared_invert_signal = false;
-    prepared_loader_mode = LOADER_MODE_OFF;
+    prepared_loader_mode = LOADER_MODE_NORMAL_1_1;
     engine_state = PLAY_ENGINE_STATE_STOPPED;
     total_duration_ms = 0UL;
     play_engine_clock_reset();

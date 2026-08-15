@@ -15,7 +15,7 @@ typedef enum
 
 typedef enum
 {
-    MENU_LOADER_OFF = 0,
+    MENU_LOADER_NORMAL = 0,
     MENU_LOADER_AUTO,
     MENU_LOADER_UL,
     MENU_LOADER_UL_MZ800,
@@ -28,16 +28,17 @@ typedef enum
 
 typedef enum
 {
-    MENU_SPEED_1_4 = 0,
-    MENU_SPEED_1_3,
+    MENU_SPEED_1_1 = 0,
     MENU_SPEED_1_2,
+    MENU_SPEED_1_3,
+    MENU_SPEED_1_4,
     MENU_SPEED_COUNT
 } menu_speed_t;
 
 static menu_item_t selected_item = MENU_ITEM_INVERT_SIGNAL;
 static bool invert_signal = false;
-static menu_loader_t loader_mode = MENU_LOADER_OFF;
-static menu_speed_t loader_speed = MENU_SPEED_1_4;
+static menu_loader_t loader_mode = MENU_LOADER_NORMAL;
+static menu_speed_t loader_speed = MENU_SPEED_1_1;
 static play_control_mode_t play_control_mode = PLAY_CONTROL_MOTOR;
 
 static const char text_invert[] PROGMEM = ">WAV INVERT";
@@ -46,6 +47,7 @@ static const char text_loader[] PROGMEM = ">LOADER";
 static const char text_speed[] PROGMEM = ">SPEED";
 static const char text_on[] PROGMEM = " ON";
 static const char text_off[] PROGMEM = " OFF";
+static const char text_normal[] PROGMEM = " NORMAL";
 static const char text_auto[] PROGMEM = " AUTO";
 static const char text_ul[] PROGMEM = " UL";
 static const char text_ul_mz800[] PROGMEM = " UL MZ800";
@@ -54,6 +56,7 @@ static const char text_mz700_3x[] PROGMEM = " MZ700 3X";
 static const char text_ic[] PROGMEM = " IC";
 static const char text_tc[] PROGMEM = " TC";
 static const char text_speed_none[] PROGMEM = " --";
+static const char text_speed_1_1[] PROGMEM = " 1:1";
 static const char text_speed_1_4[] PROGMEM = " 1:4";
 static const char text_speed_1_3[] PROGMEM = " 1:3";
 static const char text_speed_1_2[] PROGMEM = " 1:2";
@@ -82,12 +85,26 @@ PGM_P play_control_mode_label_P(play_control_mode_t mode)
 
 static bool loader_uses_speed(void)
 {
-    return (loader_mode == MENU_LOADER_IC) || (loader_mode == MENU_LOADER_TC);
+    return (loader_mode == MENU_LOADER_NORMAL) ||
+           (loader_mode == MENU_LOADER_IC) ||
+           (loader_mode == MENU_LOADER_TC);
 }
 
 static void normalize_speed(void)
 {
-    if ((loader_mode == MENU_LOADER_TC) && (loader_speed == MENU_SPEED_1_4))
+    if ((loader_mode == MENU_LOADER_NORMAL) &&
+        (loader_speed == MENU_SPEED_1_4))
+    {
+        loader_speed = MENU_SPEED_1_1;
+    }
+    else if ((loader_mode == MENU_LOADER_IC) &&
+             (loader_speed == MENU_SPEED_1_1))
+    {
+        loader_speed = MENU_SPEED_1_4;
+    }
+    else if ((loader_mode == MENU_LOADER_TC) &&
+             ((loader_speed == MENU_SPEED_1_1) ||
+              (loader_speed == MENU_SPEED_1_4)))
     {
         loader_speed = MENU_SPEED_1_3;
     }
@@ -104,7 +121,7 @@ static PGM_P loader_label_P(void)
         case MENU_LOADER_MZ700_3X: return text_mz700_3x;
         case MENU_LOADER_IC: return text_ic;
         case MENU_LOADER_TC: return text_tc;
-        default: return text_off;
+        default: return text_normal;
     }
 }
 
@@ -113,6 +130,7 @@ static PGM_P speed_label_P(void)
     if (!loader_uses_speed()) return text_speed_none;
     switch (loader_speed)
     {
+        case MENU_SPEED_1_1: return text_speed_1_1;
         case MENU_SPEED_1_4: return text_speed_1_4;
         case MENU_SPEED_1_2: return text_speed_1_2;
         default: return text_speed_1_3;
@@ -128,10 +146,35 @@ static void cycle_loader(void)
 
 static void cycle_speed(void)
 {
-    if (loader_mode == MENU_LOADER_IC)
+    if (loader_mode == MENU_LOADER_NORMAL)
     {
-        loader_speed = (menu_speed_t)(((uint8_t)loader_speed + 1U) %
-                                      (uint8_t)MENU_SPEED_COUNT);
+        if (loader_speed == MENU_SPEED_1_1)
+        {
+            loader_speed = MENU_SPEED_1_2;
+        }
+        else if (loader_speed == MENU_SPEED_1_2)
+        {
+            loader_speed = MENU_SPEED_1_3;
+        }
+        else
+        {
+            loader_speed = MENU_SPEED_1_1;
+        }
+    }
+    else if (loader_mode == MENU_LOADER_IC)
+    {
+        if (loader_speed == MENU_SPEED_1_4)
+        {
+            loader_speed = MENU_SPEED_1_3;
+        }
+        else if (loader_speed == MENU_SPEED_1_3)
+        {
+            loader_speed = MENU_SPEED_1_2;
+        }
+        else
+        {
+            loader_speed = MENU_SPEED_1_4;
+        }
     }
     else if (loader_mode == MENU_LOADER_TC)
     {
@@ -152,8 +195,8 @@ void menu_init(void)
 {
     selected_item = MENU_ITEM_INVERT_SIGNAL;
     invert_signal = false;
-    loader_mode = MENU_LOADER_OFF;
-    loader_speed = MENU_SPEED_1_4;
+    loader_mode = MENU_LOADER_NORMAL;
+    loader_speed = MENU_SPEED_1_1;
     play_control_mode = PLAY_CONTROL_MOTOR;
 }
 
@@ -231,6 +274,12 @@ loader_mode_t menu_get_loader_mode(void)
 {
     switch (loader_mode)
     {
+        case MENU_LOADER_NORMAL:
+            if (loader_speed == MENU_SPEED_1_2)
+                return LOADER_MODE_NORMAL_1_2;
+            if (loader_speed == MENU_SPEED_1_3)
+                return LOADER_MODE_NORMAL_1_3;
+            return LOADER_MODE_NORMAL_1_1;
         case MENU_LOADER_AUTO:
             return LOADER_MODE_AUTO;
         case MENU_LOADER_UL:
@@ -249,7 +298,7 @@ loader_mode_t menu_get_loader_mode(void)
             return (loader_speed == MENU_SPEED_1_2) ?
                 LOADER_MODE_TC_1_2 : LOADER_MODE_TC_1_3;
         default:
-            return LOADER_MODE_OFF;
+            return LOADER_MODE_NORMAL_1_1;
     }
 }
 

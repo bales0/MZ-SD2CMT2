@@ -34,15 +34,16 @@
 #define MZF_LOADER_TC_WORKSPACE_OFFSET 0x4DU
 #define MZF_LOADER_TC_HEADER_TAG_OFFSET 0x18U
 #define MZF_LOADER_PREFIX_BYTES 10U
-#define MZF_LOADER_MZ800_PREFIX_BYTES 6U
+#define MZF_LOADER_MZ800_PREFIX_BYTES 7U
 #define MZF_LOADER_MZ800_RELOCATOR_BYTES 14U
 #define MZF_LOADER_MZ700_UL_PREFIX_BYTES 7U
 #define MZF_LOADER_MZ700_UL_LOW_RAM_MAP_BYTES 2U
-#define MZF_LOADER_MZ700_UL_DISPLAY_BYTES 20U
-#define MZF_LOADER_MZ700_UL_NAME_BYTES 15U
-#define MZF_LOADER_MZ700_UL_LOW_RAM_NAME_BYTES 13U
+#define MZF_LOADER_MZ700_UL_DISPLAY_BYTES 9U
+#define MZF_LOADER_MZ700_UL_CLS_SOURCE_BYTE 0x16U
+#define MZF_LOADER_MZ700_UL_NAME_BYTES 17U
+#define MZF_LOADER_MZ700_UL_LOW_RAM_NAME_BYTES 17U
 #define MZF_LOADER_MZ700_UL_STATUS_END_BYTES 1U
-#define MZF_LOADER_MZ700_UL_CURSOR_ADDR 0x1171U
+#define MZF_LOADER_CMT_DEFAULT_BYTES 4U
 #define MZF_LOADER_MZ700_LOW_RAM_END 0x1000U
 #define MZF_LOADER_HIGH_STACK_SAVE_BYTES 4U
 #define MZF_LOADER_HIGH_STACK_SET_BYTES 3U
@@ -166,78 +167,124 @@ static const uint8_t loader_body_P[] PROGMEM =
     0x79,                   /* ld a,c */
     0xB0,                   /* or b */
     0x20, 0xD6,             /* jr nz,l1 */
-    0x00,                   /* nop; keep interrupts disabled for entry */
-    0xE1,                   /* pop hl */
+    0x01, 0x00, 0x01,       /* ld bc,$0100: monitor CMT default code */
+    0xD9,                   /* exx: publish the default in BC' */
+    0xE1,                   /* pop hl: original execution address */
     0xE9                    /* jp (hl) */
-};
-
-/*
-   Compact receiver used by the MZ-800 header-only UL.
-   Its final byte is JP nn opcode (C3).  In the relocated HIGH version
-   the builder copies only sizeof(...)-1 bytes, restores SP, and emits
-   its own JP <real EXEC>.
-*/
-static const uint8_t loader_body_mz800_header_P[] PROGMEM =
-{
-    0x11, 0x02, 0xE0,       /* ld de,0xE002 */
-    0xF3,                   /* di */
-    0x1A,                   /* l0: ld a,(de) */
-    0xE6, 0x20,             /* and 0x20 */
-    0x28, 0xFB,             /* jr z,l0 */
-    0x3E, 0x03,             /* ld a,3 */
-    0x32, 0x03, 0xE0,       /* ld (0E003h),a */
-    0xC5,                   /* l1: push bc */
-    0x01, 0x00, 0x04,       /* ld bc,0x0400 */
-    0x1A,                   /* l2: ld a,(de) */
-    0xCB, 0x67,             /* bit 4,a */
-    0x28, 0xFB,             /* jr z,l2 */
-    0xE6, 0x20,             /* and 0x20 */
-    0xB1,                   /* or c */
-    0x07,                   /* rlca */
-    0x4F,                   /* ld c,a */
-    0x3E, 0x02,             /* ld a,2 */
-    0x32, 0x03, 0xE0,       /* ld (0E003h),a */
-    0x1A,                   /* l3: ld a,(de) */
-    0xCB, 0x67,             /* bit 4,a */
-    0x20, 0xFB,             /* jr nz,l3 */
-    0xE6, 0x20,             /* and 0x20 */
-    0xB1,                   /* or c */
-    0x07,                   /* rlca */
-    0x4F,                   /* ld c,a */
-    0x3E, 0x03,             /* ld a,3 */
-    0x32, 0x03, 0xE0,       /* ld (0E003h),a */
-    0x10, 0xE0,             /* djnz l2 */
-    0x71,                   /* ld (hl),c */
-    0xC1,                   /* pop bc */
-    0x0B,                   /* dec bc */
-    0x23,                   /* inc hl */
-    0x79,                   /* ld a,c */
-    0xB0,                   /* or b */
-    0x20, 0xD4,             /* jr nz,l1 */
-    0xC3                    /* jp exec - opcode is replaced by HIGH epilogue */
 };
 
 static const uint8_t loader_body_mz800_header_high_exx_P[] PROGMEM =
 {
-    0x11U, 0x02U, 0xE0U, 0xF3U, 0x1AU, 0xE6U, 0x20U, 0x28U,
-    0xFBU, 0x3EU, 0x03U, 0x32U, 0x03U, 0xE0U, 0x01U, 0x00U,
-    0x04U, 0x1AU, 0xCBU, 0x67U, 0x28U, 0xFBU, 0xE6U, 0x20U,
-    0xB1U, 0x07U, 0x4FU, 0x3EU, 0x02U, 0x32U, 0x03U, 0xE0U,
-    0x1AU, 0xCBU, 0x67U, 0x20U, 0xFBU, 0xE6U, 0x20U, 0xB1U,
-    0x07U, 0x4FU, 0x3EU, 0x03U, 0x32U, 0x03U, 0xE0U, 0x10U,
-    0xE0U, 0x71U, 0x23U, 0xD9U, 0x0BU, 0x79U, 0xB0U, 0xD9U,
-    0x20U, 0xD4U, 0xC3U
+    0x11U, 0x02U, 0xE0U,       /* ld de,$E002 */
+    0xF3U,                     /* di */
+    0x1AU, 0xE6U, 0x20U,       /* wait WRITE high */
+    0x28U, 0xFBU,
+    0x13U, 0x73U, 0x1BU,       /* ($E003)=3; E is already $03 */
+    0x01U, 0x00U, 0x04U,       /* l1: ld bc,$0400 */
+    0x1AU, 0xCBU, 0x67U,       /* l2: wait first WRITE phase */
+    0x28U, 0xFBU,
+    0xE6U, 0x20U, 0xB1U, 0x07U, 0x4FU,
+    0x13U, 0x36U, 0x02U, 0x1BU, /* ($E003)=2 */
+    0x1AU, 0xCBU, 0x67U,       /* l3: wait second WRITE phase */
+    0x20U, 0xFBU,
+    0xE6U, 0x20U, 0xB1U, 0x07U, 0x4FU,
+    0x13U, 0x73U, 0x1BU,       /* ($E003)=3 */
+    0x10U, 0xE3U,             /* djnz l2 */
+    0x71U, 0x23U,             /* ld (hl),c / inc hl */
+    0xD9U, 0x0BU, 0x79U, 0xB0U, 0xD9U,
+    0x20U, 0xD7U,             /* jr nz,l1 */
+    0xC3U                     /* jp exec - supplied by builder */
 };
 
+static_assert((sizeof(mz800_header_prolog_P) +
+               MZF_LOADER_MZ800_PREFIX_BYTES +
+               sizeof(loader_body_mz800_header_high_exx_P) + 2U +
+               MZF_LOADER_CMT_DEFAULT_BYTES) ==
+              MZF_LOADER_MZ800_HEADER_CAPACITY,
+              "MZ800 LOW header-only UL must fill exactly 96 bytes");
+
+static_assert((MZF_LOADER_MZ800_RELOCATOR_BYTES + 10U + 2U +
+               MZF_LOADER_MZ800_PREFIX_BYTES +
+               (sizeof(loader_body_mz800_header_high_exx_P) - 1U) +
+               MZF_LOADER_CMT_DEFAULT_BYTES + 3U) <=
+              MZF_LOADER_MZ800_HEADER_CAPACITY,
+              "MZ800 HIGH header-only UL exceeds Description");
+
+
+/*
+   Proven generic UL receiver.  Keep the handshake loop unchanged and add
+   the monitor default-device value only in the builder after the transfer
+   has completed, immediately before entry to the loaded program.
+*/
+static const uint8_t loader_body_ul_working_P[] PROGMEM =
+{
+    0x11, 0x02, 0xE0, 0xDD, 0x21, 0x03, 0xE0, 0xAF,
+    0x3D, 0x20, 0xFD, 0xF3, 0x1A, 0xE6, 0x20, 0x28,
+    0xFB, 0xDD, 0x36, 0x00, 0x03, 0xC5, 0x01, 0x00,
+    0x04, 0x1A, 0xCB, 0x67, 0x28, 0xFB, 0xE6, 0x20,
+    0xB1, 0x07, 0x4F, 0xDD, 0x36, 0x00, 0x02, 0x1A,
+    0xCB, 0x67, 0x20, 0xFB, 0xE6, 0x20, 0xB1, 0x07,
+    0x4F, 0xDD, 0x36, 0x00, 0x03, 0x10, 0xE2, 0x71,
+    0xC1, 0x0B, 0x23, 0x79, 0xB0, 0x20, 0xD6, 0x00,
+    0xE1, 0xE9
+};
+
+/*
+   MZ800 LOW with the proven handshake order.  The shorter, equivalent
+   $E003 writes leave four tail bytes for LD B,1 / EXX / JP, matching the
+   monitor's final LD BC,$0100 / EXX state without growing past 96 bytes.
+*/
+static const uint8_t loader_body_mz800_low_working_P[] PROGMEM =
+{
+    0x11, 0x02, 0xE0, 0xF3, 0x1A, 0xE6, 0x20, 0x28,
+    0xFB, 0x13, 0x7B, 0x12, 0x1B, 0xC5, 0x01, 0x00,
+    0x04, 0x1A, 0xCB, 0x67, 0x28, 0xFB, 0xE6, 0x20,
+    0xB1, 0x07, 0x4F, 0x7B, 0x13, 0x12, 0x1B, 0x1A,
+    0xCB, 0x67, 0x20, 0xFB, 0xE6, 0x20, 0xB1, 0x07,
+    0x4F, 0x13, 0x7B, 0x12, 0x1B, 0x10, 0xE2, 0x71,
+    0xC1, 0x0B, 0x23, 0x79, 0xB0, 0x20, 0xD6, 0x06,
+    0x01, 0xD9, 0xC3
+};
+
+/*
+   MZ800 HIGH: the three writes to $E003 use DE=$E002 without changing
+   their order.  The saved bytes set BC'=$0100 only after the payload count
+   has reached zero.  Size remains identical to the proven 59-byte body.
+*/
+static const uint8_t loader_body_mz800_high_working_P[] PROGMEM =
+{
+    0x11, 0x02, 0xE0, 0xF3, 0x1A, 0xE6, 0x20, 0x28,
+    0xFB, 0x13, 0x7B, 0x12, 0x1B, 0x01, 0x00, 0x04,
+    0x1A, 0xCB, 0x67, 0x28, 0xFB, 0xE6, 0x20, 0xB1,
+    0x07, 0x4F, 0x7B, 0x13, 0x12, 0x1B, 0x1A, 0xCB,
+    0x67, 0x20, 0xFB, 0xE6, 0x20, 0xB1, 0x07, 0x4F,
+    0x13, 0x7B, 0x12, 0x1B, 0x10, 0xE2, 0x71, 0x23,
+    0xD9, 0x0B, 0x79, 0xB0, 0xD9, 0x20, 0xD6, 0x4F,
+    0x04, 0xD9, 0xC3
+};
+
+static_assert(sizeof(loader_body_mz800_low_working_P) == 59U,
+              "MZ800 LOW receiver size changed");
+static_assert(sizeof(loader_body_mz800_high_working_P) == 59U,
+              "MZ800 HIGH receiver size changed");
 static_assert((MZF_LOADER_MZ700_UL_PREFIX_BYTES +
                MZF_LOADER_MZ700_UL_LOW_RAM_MAP_BYTES +
                MZF_LOADER_MZ700_UL_DISPLAY_BYTES +
-               sizeof(loader_body_mz800_header_high_exx_P) + 2U +
+               sizeof(loader_body_mz800_high_working_P) + 2U +
                MZF_LOADER_MZ700_UL_LOW_RAM_NAME_BYTES +
                MZF_LOADER_MZ700_UL_STATUS_END_BYTES) <=
               MZ700_FAST3_RUNTIME_CAPACITY,
               "MZ700 header-only UL runtime exceeds Description");
-
+static_assert((sizeof(mz800_header_prolog_P) +
+               6U + /* LD BC,size + LD HL,load */
+               sizeof(loader_body_mz800_low_working_P) + 2U) ==
+              MZF_LOADER_MZ800_HEADER_CAPACITY,
+              "MZ800 LOW working loader must be exactly 96 bytes");
+static_assert((MZF_LOADER_MZ800_RELOCATOR_BYTES + 10U +
+               sizeof(mz800_high_low_ram_map_P) + 4U + 3U +
+               sizeof(loader_body_mz800_high_working_P) + 2U) ==
+              MZF_LOADER_MZ800_HEADER_CAPACITY,
+              "MZ800 HIGH working loader must be exactly 96 bytes");
 
 typedef struct
 {
@@ -271,6 +318,159 @@ static void write_le16(uint8_t *bytes, uint16_t value)
 {
     bytes[0] = (uint8_t)(value & 0xFFU);
     bytes[1] = (uint8_t)(value >> 8U);
+}
+
+static uint16_t mzf_loader_working_generic_base_size(void)
+{
+    /* EXX; LD BC,$0100; EXX is emitted after the proven receive loop. */
+    return (uint16_t)(MZF_LOADER_PREFIX_BYTES +
+                      sizeof(loader_body_ul_working_P) + 5U);
+}
+
+static uint16_t mzf_loader_build_working_generic(uint8_t *destination)
+{
+    uint16_t offset = 0U;
+    uint16_t high_saved_sp_address = 0U;
+
+    if (context.variant == MZF_LOADER_VARIANT_HIGH)
+    {
+        high_saved_sp_address =
+            (uint16_t)(context.loader_address + context.loader_size);
+
+        destination[offset++] = 0xEDU;       /* ld (saved-sp),sp */
+        destination[offset++] = 0x73U;
+        write_le16(destination + offset, high_saved_sp_address);
+        offset = (uint16_t)(offset + 2U);
+
+        destination[offset++] = 0x31U;       /* ld sp,temp-stack-end */
+        write_le16(destination + offset,
+                   (uint16_t)(high_saved_sp_address +
+                              MZF_LOADER_HIGH_SAVED_SP_BYTES +
+                              MZF_LOADER_HIGH_STACK_BYTES));
+        offset = (uint16_t)(offset + 2U);
+
+        for (uint8_t i = 0U; i < sizeof(mz800_high_low_ram_map_P); ++i)
+        {
+            destination[offset++] =
+                (uint8_t)pgm_read_byte(mz800_high_low_ram_map_P + i);
+        }
+    }
+
+    destination[offset++] = 0x01U;           /* ld bc,payload size */
+    write_le16(destination + offset, context.data_length);
+    offset = (uint16_t)(offset + 2U);
+    destination[offset++] = 0x21U;           /* ld hl,payload load */
+    write_le16(destination + offset, context.data_load_address);
+    offset = (uint16_t)(offset + 2U);
+    destination[offset++] = 0x11U;           /* ld de,real exec */
+    write_le16(destination + offset, context.exec_address);
+    offset = (uint16_t)(offset + 2U);
+    destination[offset++] = 0xD5U;           /* push de */
+
+    /* Copy through JR NZ,l1; the old NOP/POP HL/JP (HL) tail follows the
+       BC' update below.  No handshake instruction is changed. */
+    for (uint8_t i = 0U;
+         i < (uint8_t)(sizeof(loader_body_ul_working_P) - 3U); ++i)
+    {
+        destination[offset++] =
+            (uint8_t)pgm_read_byte(loader_body_ul_working_P + i);
+    }
+
+    destination[offset++] = 0xD9U;           /* exx */
+    destination[offset++] = 0x01U;           /* ld bc,$0100 (BC') */
+    destination[offset++] = 0x00U;
+    destination[offset++] = 0x01U;
+    destination[offset++] = 0xD9U;           /* exx */
+    destination[offset++] = 0x00U;           /* nop; keep DI for entry */
+    destination[offset++] = 0xE1U;           /* pop hl = real exec */
+
+    if (context.variant == MZF_LOADER_VARIANT_HIGH)
+    {
+        destination[offset++] = 0xEDU;       /* ld sp,(saved-sp) */
+        destination[offset++] = 0x7BU;
+        write_le16(destination + offset, high_saved_sp_address);
+        offset = (uint16_t)(offset + 2U);
+    }
+    destination[offset++] = 0xE9U;           /* jp (hl) */
+    return offset;
+}
+
+static uint16_t mzf_loader_build_working_mz800(uint8_t *destination)
+{
+    uint16_t offset = 0U;
+
+    if (!context.mz800_header_high)
+    {
+        for (uint8_t i = 0U; i < sizeof(mz800_header_prolog_P); ++i)
+        {
+            destination[offset++] =
+                (uint8_t)pgm_read_byte(mz800_header_prolog_P + i);
+        }
+        destination[offset++] = 0x01U;
+        write_le16(destination + offset, context.data_length);
+        offset = (uint16_t)(offset + 2U);
+        destination[offset++] = 0x21U;
+        write_le16(destination + offset, context.data_load_address);
+        offset = (uint16_t)(offset + 2U);
+        for (uint8_t i = 0U;
+             i < sizeof(loader_body_mz800_low_working_P); ++i)
+        {
+            destination[offset++] = (uint8_t)pgm_read_byte(
+                loader_body_mz800_low_working_P + i);
+        }
+        write_le16(destination + offset, context.exec_address);
+        return (uint16_t)(offset + 2U);
+    }
+
+    /* Stage 1 @ $1110 relocates the fixed 82-byte stage 2 to $C000. */
+    destination[offset++] = 0x21U;
+    write_le16(destination + offset,
+               (uint16_t)(MZF_LOADER_MZ800_HEADER_ADDR +
+                          MZF_LOADER_MZ800_RELOCATOR_BYTES));
+    offset = (uint16_t)(offset + 2U);
+    destination[offset++] = 0x11U;
+    write_le16(destination + offset, MZF_LOADER_HIGH_LOAD_ADDR);
+    offset = (uint16_t)(offset + 2U);
+    destination[offset++] = 0x01U;
+    write_le16(destination + offset, 82U);
+    offset = (uint16_t)(offset + 2U);
+    destination[offset++] = 0xEDU;
+    destination[offset++] = 0xB0U;
+    destination[offset++] = 0xC3U;
+    write_le16(destination + offset, MZF_LOADER_HIGH_LOAD_ADDR);
+    offset = (uint16_t)(offset + 2U);
+
+    /* Verified minimum MZ800 monitor initialization. */
+    destination[offset++] = 0x3EU;
+    destination[offset++] = 0x08U;
+    destination[offset++] = 0xD3U;
+    destination[offset++] = 0xCEU;
+    destination[offset++] = 0xCDU;
+    destination[offset++] = 0x3EU;
+    destination[offset++] = 0x07U;
+    destination[offset++] = 0xCDU;
+    destination[offset++] = 0x08U;
+    destination[offset++] = 0x03U;
+    for (uint8_t i = 0U; i < sizeof(mz800_high_low_ram_map_P); ++i)
+    {
+        destination[offset++] =
+            (uint8_t)pgm_read_byte(mz800_high_low_ram_map_P + i);
+    }
+    destination[offset++] = 0x01U;
+    write_le16(destination + offset, context.data_length);
+    offset = (uint16_t)(offset + 2U);
+    destination[offset++] = 0xD9U;           /* count -> BC' */
+    destination[offset++] = 0x21U;
+    write_le16(destination + offset, context.data_load_address);
+    offset = (uint16_t)(offset + 2U);
+    for (uint8_t i = 0U;
+         i < sizeof(loader_body_mz800_high_working_P); ++i)
+    {
+        destination[offset++] = (uint8_t)pgm_read_byte(
+            loader_body_mz800_high_working_P + i);
+    }
+    write_le16(destination + offset, context.exec_address);
+    return (uint16_t)(offset + 2U);
 }
 
 static bool is_ic_mode(loader_mode_t mode)
@@ -350,28 +550,34 @@ static void patch_tc_workspace_restore(uint8_t *destination)
 
 static uint16_t mz800_header_low_size(void)
 {
-    /* Exact working master LOW header-only loader: 29 + 6 + 59 + 2 = 96 B. */
+    /* Prolog + EXX prefix + receiver + CMT default + JP address = 96 B. */
     return (uint16_t)(sizeof(mz800_header_prolog_P) +
                       MZF_LOADER_MZ800_PREFIX_BYTES +
-                      sizeof(loader_body_mz800_header_P) + 2U);
+                      sizeof(loader_body_mz800_header_high_exx_P) + 2U +
+                      MZF_LOADER_CMT_DEFAULT_BYTES);
 }
 
 static uint16_t mz800_header_high_stage2_size(void)
 {
+    /* Restored working HIGH body: 82-byte stage 2, 14-byte relocator. */
+    return 82U;
     /*
        MZ800 header-only HIGH stage 2:
          verified MZ800/monitor init          10
-         map low RAM                           4
+         map low RAM                           2
          LD BC,size + EXX (count -> BC')       4
          LD HL,load                            3
-         stack-free EXX receiver, no final JP 58
+         stack-free EXX receiver, no final JP 53
+         set monitor CMT default in BC'         4
          JP real EXEC                         3
-       Total: 82 bytes.
+       Total: 79 bytes.
 
-       The 14-byte relocator plus this stage fills the complete 96-byte
-       executable area of the 128-byte fake header.
+       The 14-byte relocator plus this stage uses 93 of the 96 executable
+       bytes in the 128-byte fake header.
     */
-    return 82U;
+    return (uint16_t)(10U + 2U + MZF_LOADER_MZ800_PREFIX_BYTES +
+                      (sizeof(loader_body_mz800_header_high_exx_P) - 1U) +
+                      MZF_LOADER_CMT_DEFAULT_BYTES + 3U);
 }
 
 static uint16_t mz800_header_high_size(void)
@@ -423,8 +629,7 @@ static uint8_t mz700_ul_code_size(void)
 {
     uint8_t size = (uint8_t)(MZF_LOADER_MZ700_UL_DISPLAY_BYTES +
                              MZF_LOADER_MZ700_UL_PREFIX_BYTES +
-                             sizeof(loader_body_mz800_header_high_exx_P) +
-                             2U);
+                             sizeof(loader_body_mz800_high_working_P) + 2U);
 
     if (mz700_ul_needs_low_ram_map())
     {
@@ -442,6 +647,12 @@ static uint8_t mz700_ul_runtime_size(void)
 
 static uint16_t loader_size(loader_mode_t mode)
 {
+    if (!is_ic_mode(mode) && !is_tc_mode(mode) &&
+        (mode != LOADER_MODE_UL_MZ800))
+    {
+        return mzf_loader_working_generic_base_size();
+    }
+
     uint16_t size;
 
     if (is_ic_mode(mode))
@@ -539,13 +750,14 @@ static inline void sense_set(uint8_t level)
     else PORTD &= (uint8_t)~_BV(PD3);
 }
 
-static bool wait_write_level(uint8_t expected)
+/* Keep the original, hardware-proven MZ800/classic-UL handshake path
+   independent from the later MZ700 header-only extension. */
+static bool wait_write_level_legacy(uint8_t expected)
 {
     uint32_t start = micros();
     uint32_t timeout = MZF_LOADER_TIMEOUT_US;
 
     if (((context.variant == MZF_LOADER_VARIANT_MZ800_HEADER) ||
-         is_mz700_ul_variant(context.variant) ||
          (context.variant == MZF_LOADER_VARIANT_HIGH)) &&
         !context.initial_wait_used)
     {
@@ -562,11 +774,29 @@ static bool wait_write_level(uint8_t expected)
     }
 
     if ((context.variant == MZF_LOADER_VARIANT_MZ800_HEADER) ||
-        is_mz700_ul_variant(context.variant) ||
         (context.variant == MZF_LOADER_VARIANT_HIGH))
     {
         context.initial_wait_used = true;
     }
+    return true;
+}
+
+static bool wait_write_level_mz700(uint8_t expected)
+{
+    uint32_t start = micros();
+    uint32_t timeout = context.initial_wait_used ?
+        MZF_LOADER_TIMEOUT_US : MZF_LOADER_HEADER_INITIAL_TIMEOUT_US;
+
+    while (write_level() != expected)
+    {
+        if ((uint32_t)(micros() - start) > timeout)
+        {
+            set_error_P(PSTR("UL WAIT"));
+            return false;
+        }
+    }
+
+    context.initial_wait_used = true;
     return true;
 }
 
@@ -575,17 +805,37 @@ static uint8_t rotate_data(uint8_t value)
     return (uint8_t)((value << 2U) | (value >> 6U));
 }
 
-static bool send_byte(uint8_t value)
+static bool send_byte_legacy(uint8_t value)
 {
     uint8_t data = rotate_data((uint8_t)~value);
 
     for (uint8_t pair = 0U; pair < 4U; ++pair)
     {
-        if (!wait_write_level(0U)) return false;
+        if (!wait_write_level_legacy(0U)) return false;
         read_set((data & 0x80U) ? 1U : 0U);
         sense_set(0U);
 
-        if (!wait_write_level(1U)) return false;
+        if (!wait_write_level_legacy(1U)) return false;
+        read_set((data & 0x40U) ? 1U : 0U);
+        sense_set(1U);
+
+        data <<= 2U;
+    }
+
+    return true;
+}
+
+static bool send_byte_mz700(uint8_t value)
+{
+    uint8_t data = rotate_data((uint8_t)~value);
+
+    for (uint8_t pair = 0U; pair < 4U; ++pair)
+    {
+        if (!wait_write_level_mz700(0U)) return false;
+        read_set((data & 0x80U) ? 1U : 0U);
+        sense_set(0U);
+
+        if (!wait_write_level_mz700(1U)) return false;
         read_set((data & 0x40U) ? 1U : 0U);
         sense_set(1U);
 
@@ -613,7 +863,10 @@ bool mzf_loader_prepare(file_format_t format,
 
     mzf_loader_reset();
 
-    if ((mode == LOADER_MODE_OFF) || (format != FILE_FORMAT_MZF) ||
+    if ((mode == LOADER_MODE_NORMAL_1_1) ||
+        (mode == LOADER_MODE_NORMAL_1_2) ||
+        (mode == LOADER_MODE_NORMAL_1_3) ||
+        (format != FILE_FORMAT_MZF) ||
         (header == NULL))
     {
         return false;
@@ -953,6 +1206,16 @@ uint16_t mzf_loader_build_loader(uint8_t *destination, uint16_t capacity)
         return 0U;
     }
 
+    if ((context.variant == MZF_LOADER_VARIANT_LOW) ||
+        (context.variant == MZF_LOADER_VARIANT_HIGH))
+    {
+        return mzf_loader_build_working_generic(destination);
+    }
+    if (context.variant == MZF_LOADER_VARIANT_MZ800_HEADER)
+    {
+        return mzf_loader_build_working_mz800(destination);
+    }
+
     if (is_ic_variant(context.variant))
     {
         for (uint8_t i = 0U; i < MZF_LOADER_MZ800_HEADER_CAPACITY; ++i)
@@ -979,26 +1242,13 @@ uint16_t mzf_loader_build_loader(uint8_t *destination, uint16_t capacity)
         const uint16_t status_address =
             (uint16_t)(context.loader_address + mz700_ul_code_size());
 
-        /* QMSGX prints through PRNT3, so a converted $C6 byte is not a
-           monitor clear command. Clear $D000-$D7FF without calling an
-           internal ROM address: 1Z-009A has the fill routine at $09DD but
-           1Z-013A moves it to $09D4. Seed one zero byte, propagate it with
-           LDIR, then reuse the resulting BC=$0000 as the cursor position. */
-        destination[offset++] = 0x21U;           /* ld hl,$D000 */
-        write_le16(destination + offset, 0xD000U);
-        offset = (uint16_t)(offset + 2U);
-        destination[offset++] = 0x75U;           /* ld (hl),l: L=$00 */
-        destination[offset++] = 0x11U;           /* ld de,$D001 */
-        write_le16(destination + offset, 0xD001U);
-        offset = (uint16_t)(offset + 2U);
-        destination[offset++] = 0x01U;           /* ld bc,$07FF */
-        write_le16(destination + offset, 0x07FFU);
-        offset = (uint16_t)(offset + 2U);
-        destination[offset++] = 0xEDU;
-        destination[offset++] = 0xB0U;           /* ldir: BC becomes zero */
-        destination[offset++] = 0xEDU;
-        destination[offset++] = 0x43U;           /* ld ($1171),bc */
-        write_le16(destination + offset, MZF_LOADER_MZ700_UL_CURSOR_ADDR);
+        /* $0012 PRNT first maps its input through QADCN.  Source byte $16
+           maps to control code $C6 in both supported MZ-700 monitors; that
+           control clears VRAM and resets the cursor. */
+        destination[offset++] = 0x3EU;           /* ld a,QADCN source for CLS */
+        destination[offset++] = MZF_LOADER_MZ700_UL_CLS_SOURCE_BYTE;
+        destination[offset++] = 0xCDU;           /* call $0012: PRNT */
+        write_le16(destination + offset, 0x0012U);
         offset = (uint16_t)(offset + 2U);
         destination[offset++] = 0x11U;           /* ld de,status */
         write_le16(destination + offset, status_address);
@@ -1021,13 +1271,14 @@ uint16_t mzf_loader_build_loader(uint8_t *destination, uint16_t capacity)
         offset = (uint16_t)(offset + 2U);
 
         for (uint8_t i = 0U;
-             i < (uint8_t)(sizeof(loader_body_mz800_header_high_exx_P) - 1U);
+             i < (uint8_t)(sizeof(loader_body_mz800_high_working_P) - 1U);
              ++i)
         {
             destination[offset++] =
-                pgm_read_byte(loader_body_mz800_header_high_exx_P + i);
+                pgm_read_byte(loader_body_mz800_high_working_P + i);
         }
 
+        /* The receiver tail has already published BC'=$0100. */
         destination[offset++] = 0xC3U;           /* jp real exec */
         write_le16(destination + offset, context.exec_address);
         offset = (uint16_t)(offset + 2U);
@@ -1067,10 +1318,9 @@ uint16_t mzf_loader_build_loader(uint8_t *destination, uint16_t capacity)
     else if ((context.variant == MZF_LOADER_VARIANT_MZ800_HEADER) &&
              !context.mz800_header_high)
     {
-        /*
-           EXACT working LOW header-only loader from GitHub master.
-           This byte-generation path is intentionally untouched.
-        */
+        /* Keep the proven 29-byte LOW monitor prolog.  Only the receiver is
+           shared with HIGH so the four-byte CMT default state still fits in
+           the 96-byte Description field. */
         for (uint8_t i = 0U; i < sizeof(mz800_header_prolog_P); ++i)
         {
             destination[offset++] =
@@ -1080,17 +1330,25 @@ uint16_t mzf_loader_build_loader(uint8_t *destination, uint16_t capacity)
         destination[offset++] = 0x01U;       /* ld bc,payload size */
         write_le16(destination + offset, context.data_length);
         offset = (uint16_t)(offset + 2U);
+        destination[offset++] = 0xD9U;       /* exx: count -> BC' */
 
         destination[offset++] = 0x21U;       /* ld hl,payload load */
         write_le16(destination + offset, context.data_load_address);
         offset = (uint16_t)(offset + 2U);
 
-        for (uint16_t i = 0U; i < sizeof(loader_body_mz800_header_P); ++i)
+        for (uint16_t i = 0U;
+             i < (uint16_t)(sizeof(loader_body_mz800_header_high_exx_P) - 1U);
+             ++i)
         {
             destination[offset++] =
-                (uint8_t)pgm_read_byte(loader_body_mz800_header_P + i);
+                (uint8_t)pgm_read_byte(loader_body_mz800_header_high_exx_P + i);
         }
 
+        destination[offset++] = 0x01U;       /* ld bc,$0100: CMT */
+        destination[offset++] = 0x00U;
+        destination[offset++] = 0x01U;
+        destination[offset++] = 0xD9U;       /* exx -> BC' */
+        destination[offset++] = 0xC3U;       /* jp real exec */
         write_le16(destination + offset, context.exec_address);
         offset = (uint16_t)(offset + 2U);
         return offset;
@@ -1161,12 +1419,10 @@ uint16_t mzf_loader_build_loader(uint8_t *destination, uint16_t capacity)
         destination[offset++] = 0x08U;
         destination[offset++] = 0x03U;
 
-        /* Make low RAM writable before the payload transfer. */
-        for (uint8_t i = 0U; i < sizeof(mz800_high_low_ram_map_P); ++i)
-        {
-            destination[offset++] =
-                pgm_read_byte(mz800_high_low_ram_map_P + i);
-        }
+        /* Port $E0 is command-decoded; its data byte is irrelevant.  A is
+           already valid after CALL $0308, so the two-byte OUT is sufficient. */
+        destination[offset++] = 0xD3U;
+        destination[offset++] = 0xE0U;       /* out ($E0),a: low RAM */
 
         /*
            Keep the remaining payload length in BC'.  Main BC is then free
@@ -1190,6 +1446,11 @@ uint16_t mzf_loader_build_loader(uint8_t *destination, uint16_t capacity)
             destination[offset++] =
                 pgm_read_byte(loader_body_mz800_header_high_exx_P + i);
         }
+
+        destination[offset++] = 0x01U;       /* ld bc,$0100: CMT */
+        destination[offset++] = 0x00U;
+        destination[offset++] = 0x01U;
+        destination[offset++] = 0xD9U;       /* exx -> BC' */
 
         destination[offset++] = 0xC3U;       /* jp real exec */
         write_le16(destination + offset, context.exec_address);
@@ -1261,7 +1522,14 @@ bool mzf_loader_begin(void)
     context.started = true;
 
     mz_sense_set_fast(true);
-    if (mzf_loader_is_header_only())
+    if (context.variant == MZF_LOADER_VARIANT_MZ800_HEADER)
+    {
+        mz_read_set_fast(false);
+        delay(MZF_LOADER_HEADER_START_DELAY_MS);
+        mz_read_set_fast(true);
+        delayMicroseconds(MZF_LOADER_HEADER_READY_DELAY_US);
+    }
+    else if (is_mz700_ul_variant(context.variant))
     {
         mz_read_set_fast(false);
         delay(MZF_LOADER_HEADER_START_DELAY_MS);
@@ -1281,6 +1549,7 @@ bool mzf_loader_pump(uint8_t max_bytes)
     uint8_t *work;
     uint16_t request;
     int16_t received;
+    bool mz700_ul;
 
     if (!context.active || !context.started)
     {
@@ -1313,18 +1582,40 @@ bool mzf_loader_pump(uint8_t max_bytes)
         return false;
     }
 
-    for (uint16_t i = 0U; i < request; ++i)
+    mz700_ul = is_mz700_ul_variant(context.variant);
+    if (mz700_ul)
     {
-        if (!send_byte(work[i]))
+        for (uint16_t i = 0U; i < request; ++i)
         {
-            return false;
+            if (!send_byte_mz700(work[i]))
+            {
+                return false;
+            }
+            context.transferred++;
         }
-        context.transferred++;
+    }
+    else
+    {
+        for (uint16_t i = 0U; i < request; ++i)
+        {
+            if (!send_byte_legacy(work[i]))
+            {
+                return false;
+            }
+            context.transferred++;
+        }
     }
 
     if (context.transferred >= context.data_length)
     {
-        if (!wait_write_level(0U)) return false;
+        if (mz700_ul)
+        {
+            if (!wait_write_level_mz700(0U)) return false;
+        }
+        else if (!wait_write_level_legacy(0U))
+        {
+            return false;
+        }
         context.finished = true;
         mz_read_set_fast(false);
         mz_sense_set_fast(true);

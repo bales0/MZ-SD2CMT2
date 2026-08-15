@@ -9,7 +9,7 @@
 static char session_full_path[PLAY_CONTROLLER_PATH_MAX];
 static file_format_t session_format = FILE_FORMAT_UNKNOWN;
 static bool session_invert_signal = false;
-static loader_mode_t session_loader_mode = LOADER_MODE_OFF;
+static loader_mode_t session_loader_mode = LOADER_MODE_NORMAL_1_1;
 static play_control_mode_t session_control_mode = PLAY_CONTROL_MOTOR;
 static play_controller_state_t session_state = PLAY_CONTROLLER_STATE_READY;
 
@@ -162,7 +162,7 @@ void play_controller_init(void)
     session_full_path[0] = '\0';
     session_format = FILE_FORMAT_UNKNOWN;
     session_invert_signal = false;
-    session_loader_mode = LOADER_MODE_OFF;
+    session_loader_mode = LOADER_MODE_NORMAL_1_1;
     session_control_mode = PLAY_CONTROL_MOTOR;
     session_state = PLAY_CONTROLLER_STATE_READY;
     waiting_for_motor = false;
@@ -365,6 +365,8 @@ void play_controller_service(void)
 
 void play_controller_get_view(play_controller_view_t *view)
 {
+    bool timed_loader_progress;
+
     if (view == NULL) return;
 
     view->filename = play_controller_session_filename();
@@ -381,9 +383,17 @@ void play_controller_get_view(play_controller_view_t *view)
     view->elapsed_ms = play_engine_get_elapsed_ms();
     view->total_duration_ms = play_engine_get_total_duration_ms();
     view->progress_phase = play_engine_get_progress_phase();
+    timed_loader_progress =
+        (view->progress_phase == PLAY_PROGRESS_PHASE_IC_TURBO_LOADER) ||
+        (view->progress_phase == PLAY_PROGRESS_PHASE_IC_TURBO_DATA) ||
+        (view->progress_phase == PLAY_PROGRESS_PHASE_TC_TURBO_LOADER) ||
+        (view->progress_phase == PLAY_PROGRESS_PHASE_TC_TURBO_DATA) ||
+        (view->progress_phase == PLAY_PROGRESS_PHASE_MZ700_FAST3_LOW) ||
+        (view->progress_phase == PLAY_PROGRESS_PHASE_MZ700_FAST3_HIGH);
     view->progress_is_percent = (session_format == FILE_FORMAT_LEP) ||
                                 (session_format == FILE_FORMAT_L16) ||
-                                (view->progress_phase != PLAY_PROGRESS_PHASE_NORMAL);
+                                ((view->progress_phase != PLAY_PROGRESS_PHASE_NORMAL) &&
+                                 !timed_loader_progress);
     view->progress_percent = play_engine_get_progress_percent();
     view->buffer_fill_percent = play_engine_get_buffer_fill_percent();
 }
