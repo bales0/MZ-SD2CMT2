@@ -11,11 +11,15 @@
 
 #define AUTONAME_HEADER_BYTES 128U
 #define AUTONAME_NAME_BYTES 17U
-#define AUTONAME_MIN_LEADER_HALVES 128U
-#define AUTONAME_MIN_MARK_HALVES 60U
-#define AUTONAME_MAX_MARK_HALVES 100U
-#define AUTONAME_FINAL_MARK_HALVES 4U
-#define AUTONAME_MAX_INTERVAL_UNITS 1024U
+#define AUTONAME_DECODER_COUNT 2U
+/* Fast header variants use a shorter leader and a 20-pulse tape mark;
+   standard ROM headers use 40 mark pulses.  The full-header checksum is the
+   final guard against a false short-leader match. */
+#define AUTONAME_MIN_LEADER_PULSES 16U
+#define AUTONAME_MIN_MARK_PULSES 12U
+#define AUTONAME_MAX_MARK_PULSES 48U
+#define AUTONAME_FINAL_MARK_PULSES 2U
+#define AUTONAME_MAX_HALF_UNITS 1024U
 #define AUTONAME_MAX_SUFFIX 99U
 
 typedef enum
@@ -27,24 +31,33 @@ typedef enum
     AUTONAME_DATA
 } autoname_decode_state_t;
 
+typedef struct
+{
+    autoname_decode_state_t state;
+    uint16_t short_x8;
+    uint16_t leader_pulses;
+    uint8_t mark_pulses;
+    uint8_t final_pulses;
+    uint8_t bit_count;
+    uint8_t byte_value;
+    uint8_t byte_index;
+    uint16_t checksum;
+    uint16_t recorded_checksum;
+    uint8_t name[AUTONAME_NAME_BYTES];
+} autoname_decoder_t;
+
 static bool autoname_enabled = false;
 static bool autoname_found = false;
-static autoname_decode_state_t autoname_state = AUTONAME_SEARCH_LEADER;
-
-/* The unit is deliberately arbitrary: WAV uses samples, L16/LEP their native
-   quantization. The leader derives the short half-period for this recording. */
-static uint16_t autoname_short_x8 = 0U;
-static uint16_t autoname_leader_halves = 0U;
-static uint8_t autoname_mark_halves = 0U;
-static uint8_t autoname_final_halves = 0U;
-
-static uint8_t autoname_pending_half = 0U;
-static uint8_t autoname_bit_count = 0U;
-static uint8_t autoname_byte_value = 0U;
-static uint8_t autoname_byte_index = 0U;
-static uint16_t autoname_checksum = 0U;
-static uint16_t autoname_recorded_checksum = 0U;
+static autoname_decoder_t autoname_decoders[AUTONAME_DECODER_COUNT];
 static char autoname_name[AUTONAME_NAME_BYTES + 1U];
+
+/* Every two adjacent half intervals form a pulse for one of two possible
+   phases.  Trying both phases makes the decoder polarity-independent and,
+   unlike half-by-half classification, lets 22 kHz WAV and 50 us LEP resolve
+   fast asymmetric pulses from their unambiguous full duration. */
+static bool autoname_have_previous_half = false;
+static uint16_t autoname_previous_half = 0U;
+static uint8_t autoname_pair_decoder = 0U;
 
 /* WAV-only run accumulator. Packed source bytes are bit 0 first. */
 static bool autoname_sample_active = false;
@@ -92,38 +105,73 @@ static const uint8_t sharp_mz_to_ascii_P[256] PROGMEM = {
 static_assert(sizeof(sharp_mz_to_ascii_P) == 256U,
               "Sharp MZ character map must contain all 256 codes");
 
-static void autoname_reset_search(uint16_t seed_units)
+static void autoname_decoder_reset(autoname_decoder_t *decoder,
+                                   uint16_t seed_units)
 {
-    autoname_state = AUTONAME_SEARCH_LEADER;
-    autoname_short_x8 = ((seed_units >= 2U) &&
-                         (seed_units <= AUTONAME_MAX_INTERVAL_UNITS)) ?
-        (uint16_t)(seed_units * 8U) : 0U;
-    autoname_leader_halves = (autoname_short_x8 != 0U) ? 1U : 0U;
-    autoname_mark_halves = 0U;
-    autoname_final_halves = 0U;
-    autoname_pending_half = 0U;
-    autoname_bit_count = 0U;
-    autoname_byte_value = 0U;
-    autoname_byte_index = 0U;
-    autoname_checksum = 0U;
-    autoname_recorded_checksum = 0U;
-    autoname_name[0] = '\0';
+    if (decoder == NULL)
+    {
+        return;
+    }
+
+    decoder->state = AUTONAME_SEARCH_LEADER;
+    decoder->short_x8 =
+        (seed_units <= (AUTONAME_MAX_HALF_UNITS * 2U)) ?
+            (uint16_t)(seed_units * 8U) : 0U;
+    decoder->leader_pulses = (decoder->short_x8 != 0U) ? 1U : 0U;
+    decoder->mark_pulses = 0U;
+    decoder->final_pulses = 0U;
+    decoder->bit_count = 0U;
+    decoder->byte_value = 0U;
+    decoder->byte_index = 0U;
+    decoder->checksum = 0U;
+    decoder->recorded_checksum = 0U;
+    decoder->name[0] = 0U;
 }
 
-/* -1 invalid, 0 short, 1 long. The midpoint is 1.5 times the calibrated
-   short half-period; the broad outer limits tolerate PCM quantization. */
-static int8_t autoname_classify_half(uint16_t duration_units)
+static bool autoname_is_leader_pulse(const autoname_decoder_t *decoder,
+                                     uint16_t duration_units)
 {
     uint32_t scaled = (uint32_t)duration_units * 8UL;
+    uint32_t average;
+    uint32_t difference;
 
-    if ((autoname_short_x8 == 0U) ||
-        ((scaled * 4UL) < (uint32_t)autoname_short_x8) ||
-        (scaled > ((uint32_t)autoname_short_x8 * 3UL)))
+    if ((decoder == NULL) || (decoder->short_x8 == 0U))
+    {
+        return false;
+    }
+
+    average = decoder->short_x8;
+    difference = (scaled >= average) ? (scaled - average) : (average - scaled);
+
+    /* Full periods normally vary by less than 25 %.  One complete input unit
+       of extra tolerance is essential for WAV 22 kHz and LEP quantization. */
+    return (((scaled * 4UL) >= (average * 3UL)) &&
+            ((scaled * 4UL) <= (average * 5UL))) ||
+           (difference <= 8UL);
+}
+
+/* -1 invalid, 0 short, 1 long. Full-pulse classification remains reliable
+   when one fast HIGH or LOW half alone has the same quantized length as a
+   half of the other class. The 1.45 midpoint covers the measured 1.75..2.0
+   long/short period ratios. */
+static int8_t autoname_classify_pulse(const autoname_decoder_t *decoder,
+                                      uint16_t duration_units)
+{
+    uint32_t scaled = (uint32_t)duration_units * 8UL;
+    uint32_t average;
+
+    if ((decoder == NULL) || (decoder->short_x8 == 0U))
     {
         return -1;
     }
 
-    return ((scaled * 2UL) < ((uint32_t)autoname_short_x8 * 3UL)) ? 0 : 1;
+    average = decoder->short_x8;
+    if (((scaled * 2UL) < average) || (scaled > (average * 3UL)))
+    {
+        return -1;
+    }
+
+    return ((scaled * 20UL) < (average * 29UL)) ? 0 : 1;
 }
 
 static uint8_t autoname_popcount8(uint8_t value)
@@ -202,45 +250,49 @@ static bool autoname_sanitize(void)
     return have_alnum && (output != 0U);
 }
 
-static void autoname_accept_byte(uint8_t value)
+static void autoname_accept_byte(autoname_decoder_t *decoder, uint8_t value)
 {
-    if (autoname_byte_index < AUTONAME_HEADER_BYTES)
+    if (decoder->byte_index < AUTONAME_HEADER_BYTES)
     {
-        autoname_checksum = (uint16_t)(autoname_checksum +
-                                      autoname_popcount8(value));
-        if ((autoname_byte_index >= 1U) &&
-            (autoname_byte_index <= AUTONAME_NAME_BYTES))
+        decoder->checksum = (uint16_t)(decoder->checksum +
+                                       autoname_popcount8(value));
+        if ((decoder->byte_index >= 1U) &&
+            (decoder->byte_index <= AUTONAME_NAME_BYTES))
         {
-            autoname_name[autoname_byte_index - 1U] = (char)value;
+            decoder->name[decoder->byte_index - 1U] = value;
         }
     }
     else
     {
-        autoname_recorded_checksum =
-            (uint16_t)((autoname_recorded_checksum << 8U) | value);
+        decoder->recorded_checksum =
+            (uint16_t)((decoder->recorded_checksum << 8U) | value);
     }
 
-    autoname_byte_index++;
-    if (autoname_byte_index == (AUTONAME_HEADER_BYTES + 2U))
+    decoder->byte_index++;
+    if (decoder->byte_index == (AUTONAME_HEADER_BYTES + 2U))
     {
-        autoname_name[AUTONAME_NAME_BYTES] = '\0';
-        if ((autoname_recorded_checksum == autoname_checksum) &&
-            autoname_sanitize())
+        if (decoder->recorded_checksum == decoder->checksum)
         {
-            autoname_found = true;
-            return;
+            memcpy(autoname_name, decoder->name, AUTONAME_NAME_BYTES);
+            autoname_name[AUTONAME_NAME_BYTES] = '\0';
+            if (autoname_sanitize())
+            {
+                autoname_found = true;
+                return;
+            }
         }
-        autoname_reset_search(0U);
+        autoname_decoder_reset(decoder, 0U);
     }
 }
 
-static void autoname_accept_pulse(uint8_t pulse_class)
+static void autoname_accept_data_pulse(autoname_decoder_t *decoder,
+                                       uint8_t pulse_class)
 {
-    if (autoname_bit_count < 8U)
+    if (decoder->bit_count < 8U)
     {
-        autoname_byte_value =
-            (uint8_t)((autoname_byte_value << 1U) | pulse_class);
-        autoname_bit_count++;
+        decoder->byte_value =
+            (uint8_t)((decoder->byte_value << 1U) | pulse_class);
+        decoder->bit_count++;
         return;
     }
 
@@ -248,141 +300,149 @@ static void autoname_accept_pulse(uint8_t pulse_class)
        long stop pulse. */
     if (pulse_class != 1U)
     {
-        autoname_reset_search(0U);
+        autoname_decoder_reset(decoder, 0U);
         return;
     }
 
-    autoname_accept_byte(autoname_byte_value);
-    autoname_byte_value = 0U;
-    autoname_bit_count = 0U;
+    autoname_accept_byte(decoder, decoder->byte_value);
+    decoder->byte_value = 0U;
+    decoder->bit_count = 0U;
+}
+
+static void autoname_feed_pulse(autoname_decoder_t *decoder,
+                                uint16_t duration_units)
+{
+    int8_t pulse_class;
+
+    if ((decoder == NULL) || autoname_found)
+    {
+        return;
+    }
+
+    if (decoder->state == AUTONAME_SEARCH_LEADER)
+    {
+        uint32_t scaled;
+
+        if (decoder->short_x8 == 0U)
+        {
+            autoname_decoder_reset(decoder, duration_units);
+            return;
+        }
+
+        scaled = (uint32_t)duration_units * 8UL;
+        if (autoname_is_leader_pulse(decoder, duration_units))
+        {
+            decoder->short_x8 = (uint16_t)
+                ((((uint32_t)decoder->short_x8 * 7UL) + scaled + 4UL) / 8UL);
+            if (decoder->leader_pulses != 0xFFFFU)
+            {
+                decoder->leader_pulses++;
+            }
+            return;
+        }
+
+        pulse_class = autoname_classify_pulse(decoder, duration_units);
+        if ((decoder->leader_pulses >= AUTONAME_MIN_LEADER_PULSES) &&
+            (pulse_class == 1))
+        {
+            decoder->state = AUTONAME_MARK_LONG;
+            decoder->mark_pulses = 1U;
+            return;
+        }
+
+        autoname_decoder_reset(decoder, duration_units);
+        return;
+    }
+
+    pulse_class = autoname_classify_pulse(decoder, duration_units);
+    if (pulse_class < 0)
+    {
+        autoname_decoder_reset(decoder, duration_units);
+        return;
+    }
+
+    if (decoder->state == AUTONAME_MARK_LONG)
+    {
+        if (pulse_class == 1)
+        {
+            if (decoder->mark_pulses != 0xFFU) decoder->mark_pulses++;
+            return;
+        }
+        if ((decoder->mark_pulses >= AUTONAME_MIN_MARK_PULSES) &&
+            (decoder->mark_pulses <= AUTONAME_MAX_MARK_PULSES))
+        {
+            decoder->state = AUTONAME_MARK_SHORT;
+            decoder->mark_pulses = 1U;
+            return;
+        }
+        autoname_decoder_reset(decoder, duration_units);
+        return;
+    }
+
+    if (decoder->state == AUTONAME_MARK_SHORT)
+    {
+        if (pulse_class == 0)
+        {
+            if (decoder->mark_pulses != 0xFFU) decoder->mark_pulses++;
+            return;
+        }
+        if ((decoder->mark_pulses >= AUTONAME_MIN_MARK_PULSES) &&
+            (decoder->mark_pulses <= AUTONAME_MAX_MARK_PULSES))
+        {
+            decoder->state = AUTONAME_MARK_FINAL;
+            decoder->final_pulses = 1U;
+            return;
+        }
+        autoname_decoder_reset(decoder, duration_units);
+        return;
+    }
+
+    if (decoder->state == AUTONAME_MARK_FINAL)
+    {
+        if (pulse_class != 1)
+        {
+            autoname_decoder_reset(decoder, duration_units);
+            return;
+        }
+        decoder->final_pulses++;
+        if (decoder->final_pulses == AUTONAME_FINAL_MARK_PULSES)
+        {
+            decoder->state = AUTONAME_DATA;
+        }
+        return;
+    }
+
+    autoname_accept_data_pulse(decoder, (uint8_t)pulse_class);
 }
 
 void record_autoname_feed_interval(uint16_t duration_units)
 {
-    int8_t pulse_class;
+    uint16_t pulse_units;
 
     if (!autoname_enabled || autoname_found)
     {
         return;
     }
-    if ((duration_units < 2U) ||
-        (duration_units > AUTONAME_MAX_INTERVAL_UNITS))
+    if ((duration_units == 0U) ||
+        (duration_units > AUTONAME_MAX_HALF_UNITS))
     {
-        autoname_reset_search(0U);
+        record_autoname_break_signal();
         return;
     }
 
-    if (autoname_state == AUTONAME_SEARCH_LEADER)
+    if (!autoname_have_previous_half)
     {
-        uint32_t scaled;
-
-        if (autoname_short_x8 == 0U)
-        {
-            autoname_reset_search(duration_units);
-            return;
-        }
-
-        scaled = (uint32_t)duration_units * 8UL;
-        if (((scaled * 2UL) >= (uint32_t)autoname_short_x8) &&
-            ((scaled * 2UL) <= ((uint32_t)autoname_short_x8 * 3UL)))
-        {
-            autoname_short_x8 = (uint16_t)
-                ((((uint32_t)autoname_short_x8 * 7UL) + scaled + 4UL) / 8UL);
-            if (autoname_leader_halves != 0xFFFFU)
-            {
-                autoname_leader_halves++;
-            }
-            return;
-        }
-
-        pulse_class = autoname_classify_half(duration_units);
-        if ((autoname_leader_halves >= AUTONAME_MIN_LEADER_HALVES) &&
-            (pulse_class == 1))
-        {
-            autoname_state = AUTONAME_MARK_LONG;
-            autoname_mark_halves = 1U;
-            return;
-        }
-
-        autoname_reset_search(duration_units);
+        autoname_previous_half = duration_units;
+        autoname_have_previous_half = true;
+        autoname_pair_decoder = 0U;
         return;
     }
 
-    pulse_class = autoname_classify_half(duration_units);
-    if (pulse_class < 0)
-    {
-        autoname_reset_search(duration_units);
-        return;
-    }
-
-    if (autoname_state == AUTONAME_MARK_LONG)
-    {
-        if (pulse_class == 1)
-        {
-            if (autoname_mark_halves != 0xFFU) autoname_mark_halves++;
-            return;
-        }
-        if ((autoname_mark_halves >= AUTONAME_MIN_MARK_HALVES) &&
-            (autoname_mark_halves <= AUTONAME_MAX_MARK_HALVES))
-        {
-            autoname_state = AUTONAME_MARK_SHORT;
-            autoname_mark_halves = 1U;
-            return;
-        }
-        autoname_reset_search(duration_units);
-        return;
-    }
-
-    if (autoname_state == AUTONAME_MARK_SHORT)
-    {
-        if (pulse_class == 0)
-        {
-            if (autoname_mark_halves != 0xFFU) autoname_mark_halves++;
-            return;
-        }
-        if ((autoname_mark_halves >= AUTONAME_MIN_MARK_HALVES) &&
-            (autoname_mark_halves <= AUTONAME_MAX_MARK_HALVES))
-        {
-            autoname_state = AUTONAME_MARK_FINAL;
-            autoname_final_halves = 1U;
-            return;
-        }
-        autoname_reset_search(duration_units);
-        return;
-    }
-
-    if (autoname_state == AUTONAME_MARK_FINAL)
-    {
-        if (pulse_class != 1)
-        {
-            autoname_reset_search(duration_units);
-            return;
-        }
-        autoname_final_halves++;
-        if (autoname_final_halves == AUTONAME_FINAL_MARK_HALVES)
-        {
-            autoname_state = AUTONAME_DATA;
-            autoname_pending_half = 0U;
-        }
-        return;
-    }
-
-    /* A complete pulse must contain two halves of the same class. Zero means
-       no pending half, so store classes as 1=short and 2=long. */
-    pulse_class++;
-    if (autoname_pending_half == 0U)
-    {
-        autoname_pending_half = (uint8_t)pulse_class;
-        return;
-    }
-    if (autoname_pending_half != (uint8_t)pulse_class)
-    {
-        autoname_reset_search(duration_units);
-        return;
-    }
-
-    autoname_pending_half = 0U;
-    autoname_accept_pulse((uint8_t)(pulse_class - 1));
+    pulse_units = (uint16_t)(autoname_previous_half + duration_units);
+    autoname_feed_pulse(&autoname_decoders[autoname_pair_decoder],
+                        pulse_units);
+    autoname_pair_decoder ^= 1U;
+    autoname_previous_half = duration_units;
 }
 
 void record_autoname_begin(bool enabled)
@@ -392,7 +452,14 @@ void record_autoname_begin(bool enabled)
     autoname_sample_active = false;
     autoname_sample_level = 0U;
     autoname_sample_run = 0U;
-    autoname_reset_search(0U);
+    autoname_have_previous_half = false;
+    autoname_previous_half = 0U;
+    autoname_pair_decoder = 0U;
+    autoname_name[0] = '\0';
+    for (uint8_t i = 0U; i < AUTONAME_DECODER_COUNT; ++i)
+    {
+        autoname_decoder_reset(&autoname_decoders[i], 0U);
+    }
 }
 
 void record_autoname_break_signal(void)
@@ -403,7 +470,13 @@ void record_autoname_break_signal(void)
     }
     autoname_sample_active = false;
     autoname_sample_run = 0U;
-    autoname_reset_search(0U);
+    autoname_have_previous_half = false;
+    autoname_previous_half = 0U;
+    autoname_pair_decoder = 0U;
+    for (uint8_t i = 0U; i < AUTONAME_DECODER_COUNT; ++i)
+    {
+        autoname_decoder_reset(&autoname_decoders[i], 0U);
+    }
 }
 
 void record_autoname_feed_packed_samples(uint8_t packed, uint8_t valid_bits)
