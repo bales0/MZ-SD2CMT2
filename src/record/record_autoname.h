@@ -17,6 +17,11 @@ void record_autoname_begin(bool enabled);
 void record_autoname_break_signal(void);
 void record_autoname_feed_packed_samples(uint8_t packed, uint8_t valid_bits);
 void record_autoname_feed_interval(uint16_t duration_units);
+void record_autoname_feed_level_interval(uint16_t duration_units,
+                                         uint8_t level);
+
+/* Reuse a header already validated by the shared MZF recorder decoder. */
+void record_autoname_accept_header(const uint8_t *header);
 
 bool record_autoname_has_name(void);
 const char *record_autoname_get_name(void);

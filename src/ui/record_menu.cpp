@@ -15,11 +15,12 @@ typedef enum
 
 typedef enum
 {
-    /* Menu order: default WAV 44 kHz -> WAV 22 kHz -> L16 -> LEP. */
+    /* Menu order keeps the existing default and adds direct MZF output. */
     RECORD_TYPE_WAV_44K = 0,
     RECORD_TYPE_WAV_22K,
     RECORD_TYPE_L16,
     RECORD_TYPE_LEP,
+    RECORD_TYPE_MZF,
     RECORD_TYPE_COUNT
 } record_type_t;
 
@@ -40,6 +41,7 @@ static const char text_lep[] PROGMEM = "LEP 50us";
 static const char text_l16[] PROGMEM = "L16 16us";
 static const char text_wav22[] PROGMEM = "WAV 22kHz";
 static const char text_wav44[] PROGMEM = "WAV 44kHz";
+static const char text_mzf[] PROGMEM = "MZF";
 static const char text_unknown[] PROGMEM = "?";
 
 static void lcd_line_P(uint8_t row, PGM_P text)
@@ -91,6 +93,7 @@ static PGM_P record_type_label_P(void)
         case RECORD_TYPE_WAV_22K: return text_wav22;
         case RECORD_TYPE_L16: return text_l16;
         case RECORD_TYPE_LEP: return text_lep;
+        case RECORD_TYPE_MZF: return text_mzf;
         default: return text_unknown;
     }
 }
@@ -169,6 +172,7 @@ void record_menu_render(void)
 
 file_format_t record_menu_get_format(void)
 {
+    if (record_type == RECORD_TYPE_MZF) return FILE_FORMAT_MZF;
     return (record_type == RECORD_TYPE_LEP) ? FILE_FORMAT_LEP :
            (record_type == RECORD_TYPE_L16) ? FILE_FORMAT_L16 : FILE_FORMAT_WAV;
 }

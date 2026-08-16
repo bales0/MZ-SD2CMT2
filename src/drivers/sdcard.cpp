@@ -1035,6 +1035,13 @@ static bool sdcard_parse_record_sequence(const char *name, uint16_t *sequence)
          (sdcard_ascii_upper(name[10]) == 'P')) ||
         ((sdcard_ascii_upper(name[8]) == 'L') &&
          (name[9] == '1') && (name[10] == '6'));
+    if (!valid_extension)
+    {
+        valid_extension =
+            (sdcard_ascii_upper(name[8]) == 'M') &&
+            (sdcard_ascii_upper(name[9]) == 'Z') &&
+            (sdcard_ascii_upper(name[10]) == 'F');
+    }
 
     if (!valid_extension || (value == 0U) || (value > 9999U))
     {

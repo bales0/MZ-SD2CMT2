@@ -195,8 +195,8 @@ static bool edge_record_begin_interval(uint8_t units)
     }
 
     output_interval_units = units;
-    record_autoname_feed_interval(units);
     output_interval_level = output_level;
+    record_autoname_feed_level_interval(units, output_interval_level);
     output_level ^= 1U;
     output_interval_active = true;
     return true;

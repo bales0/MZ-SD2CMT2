@@ -8,6 +8,7 @@
 #include "../drivers/flash_text.h"
 #include "../drivers/mzio.h"
 #include "../drivers/sdcard.h"
+#include "../formats/mz_loader_profiles.h"
 #include "../streams/wav_sample_stream.h"
 #include "mz700_fast3.h"
 
@@ -36,6 +37,8 @@
 #define MZF_LOADER_PREFIX_BYTES 10U
 #define MZF_LOADER_MZ800_PREFIX_BYTES 7U
 #define MZF_LOADER_MZ800_RELOCATOR_BYTES 14U
+#define MZF_LOADER_MZ800_WORKING_RELOCATOR_BYTES 13U
+#define MZF_LOADER_MZ800_WORKING_HIGH_STAGE2_BYTES 83U
 #define MZF_LOADER_MZ700_UL_PREFIX_BYTES 7U
 #define MZF_LOADER_MZ700_UL_LOW_RAM_MAP_BYTES 2U
 #define MZF_LOADER_MZ700_UL_DISPLAY_BYTES 9U
@@ -85,43 +88,6 @@ static const uint8_t mz800_high_low_ram_map_P[] PROGMEM =
 {
     0x3E, 0x08,             /* ld a,8 */
     0xD3, 0xE0              /* out (0E0h),a */
-};
-
-static const uint8_t ic_header_loader_P[MZF_LOADER_MZ800_HEADER_CAPACITY] PROGMEM =
-{
-    0x3E, 0x08, 0xD3, 0xCE, 0xCD, 0x3E, 0x07, 0x36,
-    0x01, 0x97, 0x57, 0x5F, 0xCD, 0x08, 0x03, 0xCD,
-    0xBE, 0x02, 0xD3, 0xE2, 0x1A, 0xD3, 0xE0, 0x12,
-    0x13, 0xCB, 0x62, 0x28, 0xF5, 0x3E, 0xC3, 0x32,
-    0x1F, 0x06, 0x21, 0x5C, 0x11, 0x22, 0x20, 0x06,
-    0x2A, 0x08, 0x11, 0x7D, 0x32, 0x12, 0x05, 0x7C,
-    0x32, 0x4B, 0x0A, 0x2A, 0x0A, 0x11, 0x22, 0x02,
-    0x11, 0xCD, 0xF8, 0x04, 0x01, 0xCF, 0x06, 0xED,
-    0x71, 0xD3, 0xE2, 0xDA, 0xAA, 0xE9, 0x21, 0x0A,
-    0x11, 0xC3, 0x08, 0xED, 0xC5, 0x3A, 0x10, 0x11,
-    0xEE, 0x0C, 0x32, 0x10, 0x11, 0x01, 0xCF, 0x06,
-    0xED, 0x79, 0xC1, 0xC9, 0x31, 0x39, 0x38, 0x37
-};
-
-static const uint8_t tc_loader_template_P[MZF_LOADER_TC_LOADER_SIZE] PROGMEM =
-{
-    0x3E, 0x08, 0xD3, 0xCE, 0xE5, 0x21, 0x00, 0x00,
-    0xD3, 0xE4, 0x7E, 0xD3, 0xE0, 0x77, 0x23, 0x7C,
-    0xFE, 0x10, 0x20, 0xF4, 0x3A, 0x4B, 0xD4, 0x32,
-    0x4B, 0x0A, 0x3A, 0x4C, 0xD4, 0x32, 0x12, 0x05,
-    0x21, 0x4D, 0xD4, 0x11, 0x02, 0x11, 0x01, 0x0D,
-    0x00, 0xED, 0xB0, 0xE1, 0x7C, 0xFE, 0xD4, 0x28,
-    0x12, 0x2A, 0x04, 0x11, 0xD9, 0x21, 0x00, 0x12,
-    0x22, 0x04, 0x11, 0xCD, 0x2A, 0x00, 0xD3, 0xE4,
-    0xC3, 0x9A, 0xE9, 0xCD, 0x2A, 0x00, 0xD3, 0xE4,
-    0xC3, 0x24, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00
-};
-
-static const uint8_t tc_header_tag_P[8] PROGMEM =
-{
-    0x5B, 0x96, 0xA5, 0x9D, 0x9A, 0xB7, 0x5D, 0x00
 };
 
 /*
@@ -280,8 +246,8 @@ static_assert((sizeof(mz800_header_prolog_P) +
                sizeof(loader_body_mz800_low_working_P) + 2U) ==
               MZF_LOADER_MZ800_HEADER_CAPACITY,
               "MZ800 LOW working loader must be exactly 96 bytes");
-static_assert((MZF_LOADER_MZ800_RELOCATOR_BYTES + 10U +
-               sizeof(mz800_high_low_ram_map_P) + 4U + 3U +
+static_assert((MZF_LOADER_MZ800_WORKING_RELOCATOR_BYTES + 10U + 3U + 2U +
+               4U + 3U +
                sizeof(loader_body_mz800_high_working_P) + 2U) ==
               MZF_LOADER_MZ800_HEADER_CAPACITY,
               "MZ800 HIGH working loader must be exactly 96 bytes");
@@ -422,25 +388,30 @@ static uint16_t mzf_loader_build_working_mz800(uint8_t *destination)
         return (uint16_t)(offset + 2U);
     }
 
-    /* Stage 1 @ $1110 relocates the fixed 82-byte stage 2 to $C000. */
+    /* Stage 1 @ $1110 relocates the fixed 83-byte stage 2 to $C000.
+       PUSH DE / RET transfers control in two bytes instead of the former
+       three-byte JP $C000, leaving one byte for the monitor melody stop. */
     destination[offset++] = 0x21U;
     write_le16(destination + offset,
                (uint16_t)(MZF_LOADER_MZ800_HEADER_ADDR +
-                          MZF_LOADER_MZ800_RELOCATOR_BYTES));
+                          MZF_LOADER_MZ800_WORKING_RELOCATOR_BYTES));
     offset = (uint16_t)(offset + 2U);
     destination[offset++] = 0x11U;
     write_le16(destination + offset, MZF_LOADER_HIGH_LOAD_ADDR);
     offset = (uint16_t)(offset + 2U);
+    destination[offset++] = 0xD5U;           /* push de = $C000 */
     destination[offset++] = 0x01U;
-    write_le16(destination + offset, 82U);
+    write_le16(destination + offset,
+               MZF_LOADER_MZ800_WORKING_HIGH_STAGE2_BYTES);
     offset = (uint16_t)(offset + 2U);
     destination[offset++] = 0xEDU;
     destination[offset++] = 0xB0U;
-    destination[offset++] = 0xC3U;
-    write_le16(destination + offset, MZF_LOADER_HIGH_LOAD_ADDR);
-    offset = (uint16_t)(offset + 2U);
+    destination[offset++] = 0xC9U;           /* ret -> saved $C000 */
 
-    /* Verified minimum MZ800 monitor initialization. */
+    /* Keep the verified MZ800 monitor initialization and explicitly stop
+       8253 counter 0 before handing control to the loaded program.  Normal
+       monitor loading already calls $02BE (MLDSP); header-only HIGH did not,
+       which left some programs with an audible inherited tone. */
     destination[offset++] = 0x3EU;
     destination[offset++] = 0x08U;
     destination[offset++] = 0xD3U;
@@ -451,11 +422,11 @@ static uint16_t mzf_loader_build_working_mz800(uint8_t *destination)
     destination[offset++] = 0xCDU;
     destination[offset++] = 0x08U;
     destination[offset++] = 0x03U;
-    for (uint8_t i = 0U; i < sizeof(mz800_high_low_ram_map_P); ++i)
-    {
-        destination[offset++] =
-            (uint8_t)pgm_read_byte(mz800_high_low_ram_map_P + i);
-    }
+    destination[offset++] = 0xCDU;
+    destination[offset++] = 0xBEU;
+    destination[offset++] = 0x02U;           /* call $02BE: melody stop */
+    destination[offset++] = 0xD3U;
+    destination[offset++] = 0xE0U;           /* data is ignored by $E0 */
     destination[offset++] = 0x01U;
     write_le16(destination + offset, context.data_length);
     offset = (uint16_t)(offset + 2U);
@@ -559,30 +530,13 @@ static uint16_t mz800_header_low_size(void)
 
 static uint16_t mz800_header_high_stage2_size(void)
 {
-    /* Restored working HIGH body: 82-byte stage 2, 14-byte relocator. */
-    return 82U;
-    /*
-       MZ800 header-only HIGH stage 2:
-         verified MZ800/monitor init          10
-         map low RAM                           2
-         LD BC,size + EXX (count -> BC')       4
-         LD HL,load                            3
-         stack-free EXX receiver, no final JP 53
-         set monitor CMT default in BC'         4
-         JP real EXEC                         3
-       Total: 79 bytes.
-
-       The 14-byte relocator plus this stage uses 93 of the 96 executable
-       bytes in the 128-byte fake header.
-    */
-    return (uint16_t)(10U + 2U + MZF_LOADER_MZ800_PREFIX_BYTES +
-                      (sizeof(loader_body_mz800_header_high_exx_P) - 1U) +
-                      MZF_LOADER_CMT_DEFAULT_BYTES + 3U);
+    /* Working HIGH body: 83-byte stage 2, 13-byte relocator. */
+    return MZF_LOADER_MZ800_WORKING_HIGH_STAGE2_BYTES;
 }
 
 static uint16_t mz800_header_high_size(void)
 {
-    return (uint16_t)(MZF_LOADER_MZ800_RELOCATOR_BYTES +
+    return (uint16_t)(MZF_LOADER_MZ800_WORKING_RELOCATOR_BYTES +
                       mz800_header_high_stage2_size());
 }
 
@@ -866,6 +820,7 @@ bool mzf_loader_prepare(file_format_t format,
     if ((mode == LOADER_MODE_NORMAL_1_1) ||
         (mode == LOADER_MODE_NORMAL_1_2) ||
         (mode == LOADER_MODE_NORMAL_1_3) ||
+        (mode == LOADER_MODE_MZ700_1X) ||
         (format != FILE_FORMAT_MZF) ||
         (header == NULL))
     {
@@ -1181,11 +1136,8 @@ bool mzf_loader_patch_loader_header(uint8_t *header)
         write_le16(header + MZF_HEADER_DATA_LENGTH_OFFSET, context.loader_size);
         write_le16(header + MZF_HEADER_LOAD_ADDRESS_OFFSET, context.loader_address);
         write_le16(header + MZF_HEADER_EXEC_ADDRESS_OFFSET, context.loader_address);
-        for (uint8_t i = 0U; i < sizeof(tc_header_tag_P); ++i)
-        {
-            header[MZF_LOADER_TC_HEADER_TAG_OFFSET + i] =
-                (uint8_t)pgm_read_byte(tc_header_tag_P + i);
-        }
+        mz_loader_profile_copy_tc_tag(
+            header + MZF_LOADER_TC_HEADER_TAG_OFFSET);
         return true;
     }
 
@@ -1218,19 +1170,13 @@ uint16_t mzf_loader_build_loader(uint8_t *destination, uint16_t capacity)
 
     if (is_ic_variant(context.variant))
     {
-        for (uint8_t i = 0U; i < MZF_LOADER_MZ800_HEADER_CAPACITY; ++i)
-        {
-            destination[i] = (uint8_t)pgm_read_byte(ic_header_loader_P + i);
-        }
+        mz_loader_profile_copy_ic_loader(destination);
         return MZF_LOADER_MZ800_HEADER_CAPACITY;
     }
 
     if (is_tc_variant(context.variant))
     {
-        for (uint8_t i = 0U; i < MZF_LOADER_TC_LOADER_SIZE; ++i)
-        {
-            destination[i] = (uint8_t)pgm_read_byte(tc_loader_template_P + i);
-        }
+        mz_loader_profile_copy_tc_loader(destination);
         destination[MZF_LOADER_TC_SPEED_OFFSET] = tc_speed_byte();
         patch_tc_workspace_restore(destination);
         return MZF_LOADER_TC_LOADER_SIZE;

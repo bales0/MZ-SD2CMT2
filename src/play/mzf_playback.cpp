@@ -12,6 +12,7 @@
 #include "../drivers/flash_text.h"
 #include "../drivers/sdcard.h"
 #include "../streams/wav_sample_stream.h"
+#include "../formats/mz_tape_profiles.h"
 
 #if !defined(TIMER3_COMPB_vect) || !defined(TIMER3_OVF_vect)
 #error "MZF playback requires Timer3 compare-B and overflow on ATmega2560"
@@ -134,6 +135,7 @@ typedef enum
     MZF_STEP_CHECKSUM_BITS,
     MZF_STEP_CHECKSUM_STOP,
     MZF_STEP_TRAILING_LONGS,
+    MZF_STEP_DUPLICATE_GAP,
     MZF_STEP_BOUNDARY
 } mzf_normal_step_t;
 
@@ -149,6 +151,19 @@ static char mzf_error_text[17];
 
 static file_format_t mzf_format = FILE_FORMAT_UNKNOWN;
 static uint8_t mzf_normal_speed_divisor = 1U;
+static bool mzf_native_mz700 = false;
+static uint16_t mzf_profile_short_high_ticks = MZF_SHORT_HIGH_TICKS;
+static uint16_t mzf_profile_short_low_ticks = MZF_SHORT_LOW_TICKS;
+static uint16_t mzf_profile_long_high_ticks = MZF_LONG_HIGH_TICKS;
+static uint16_t mzf_profile_long_low_ticks = MZF_LONG_LOW_TICKS;
+static uint16_t mzf_profile_header_leader = MZF_MZ800_LONG_GAP_SHORT_PULSES;
+static uint16_t mzf_profile_data_leader = MZF_MZ800_SHORT_GAP_SHORT_PULSES;
+static uint8_t mzf_profile_header_mark_long = MZF_MZ800_LONG_MARK_LONG_PULSES;
+static uint8_t mzf_profile_header_mark_short = MZF_MZ800_LONG_MARK_SHORT_PULSES;
+static uint8_t mzf_profile_data_mark_long = MZF_MZ800_SHORT_MARK_LONG_PULSES;
+static uint8_t mzf_profile_data_mark_short = MZF_MZ800_SHORT_MARK_SHORT_PULSES;
+static uint8_t mzf_profile_final_mark_long = MZF_MZ800_TAPE_MARK_FINAL_LONG_PULSES;
+static uint16_t mzf_profile_duplicate_gap = 0U;
 
 /* MZF ignores the UI WAV invert setting. TC turbo is auto-inverted to match
    the verified physical READ phase; IC and native/UL modes stay direct. */
@@ -165,6 +180,7 @@ static uint32_t mzf_file_size = 0UL;
 static uint32_t mzf_record_data_length = 0UL;
 /* Absolute end position of the current declared data record. */
 static uint32_t mzf_record_data_file_end = 0UL;
+static uint32_t mzf_record_data_file_start = 0UL;
 static uint32_t mzf_record_data_read = 0UL;
 static uint32_t mzf_original_data_offset = 0UL;
 static uint32_t mzf_original_data_length = 0UL;
@@ -183,6 +199,9 @@ static uint8_t mzf_normal_data = 0U;
 static uint8_t mzf_normal_bits_remaining = 0U;
 static uint8_t mzf_normal_checksum_byte_index = 0U;
 static bool mzf_normal_header_preamble = true;
+static volatile uint8_t mzf_native_copy_index = 0U;
+static volatile bool mzf_native_repeat_refill_requested = false;
+static volatile bool mzf_native_repeat_refill_ready = false;
 
 /* Written by Timer3 ISR and read in foreground. */
 static volatile bool mzf_boundary_waiting = false;
@@ -609,7 +628,9 @@ static bool mzf_read_header_record(void)
         return false;
     }
 
-    mzf_record_data_file_end = sdcard_file_position() + mzf_record_data_length;
+    mzf_record_data_file_start = sdcard_file_position();
+    mzf_record_data_file_end = mzf_record_data_file_start +
+                               mzf_record_data_length;
     mzf_header_offset = 0U;
     mzf_record_data_read = 0UL;
     mzf_fifo_reset();
@@ -663,7 +684,10 @@ static bool mzf_add_stage_duration(bool header_stage,
         uint16_t long_high;
         uint16_t long_low;
         uint32_t gap_pulses;
+        uint8_t copies;
         const uint32_t checksum_ones = mzf_popcount16(checksum);
+        uint64_t encoded_short_pulses;
+        uint64_t encoded_long_pulses;
         uint64_t short_pulses;
         uint64_t long_pulses;
         uint64_t stage_ticks;
@@ -675,37 +699,33 @@ static bool mzf_add_stage_duration(bool header_stage,
 
         const uint32_t short_period =
             (uint32_t)short_high + (uint32_t)short_low;
-        if (short_period ==
-            ((uint32_t)MZF_NORMAL_1_3_SHORT_TICKS * 2UL))
-        {
-            gap_pulses = MZF_TC_1_3_TURBO_GAP_SHORT_PULSES;
-        }
-        else if (short_period ==
-                 ((uint32_t)MZF_NORMAL_1_2_SHORT_TICKS * 2UL))
-        {
-            gap_pulses = MZF_TC_1_2_TURBO_GAP_SHORT_PULSES;
-        }
-        else
-        {
-            gap_pulses = header_stage ?
-                MZF_MZ800_LONG_GAP_SHORT_PULSES :
-                MZF_MZ800_SHORT_GAP_SHORT_PULSES;
-        }
+        gap_pulses = header_stage ? mzf_profile_header_leader :
+                                    mzf_profile_data_leader;
+        /* Direct MZ700 playback uses only the first checksummed copy.  A
+           non-zero profile separator keeps the old repeat machinery
+           available for any future cassette-oriented profile. */
+        copies = (mzf_native_mz700 &&
+                  (mzf_profile_duplicate_gap != 0U)) ? 2U : 1U;
 
         /* Data bits: zero=short, one=long.  Every byte has one long stop;
            the two checksum bytes have the same framing. */
+        encoded_short_pulses =
+            ((uint64_t)byte_count * 8ULL - one_count) +
+            (16ULL - checksum_ones);
+        encoded_long_pulses = one_count + byte_count + checksum_ones + 2ULL;
         short_pulses = (uint64_t)gap_pulses +
                        (header_stage ?
-                            MZF_MZ800_LONG_MARK_SHORT_PULSES :
-                            MZF_MZ800_SHORT_MARK_SHORT_PULSES) +
-                       ((uint64_t)byte_count * 8ULL - one_count) +
-                       (16ULL - checksum_ones);
+                            mzf_profile_header_mark_short :
+                            mzf_profile_data_mark_short) +
+                       ((uint64_t)copies * encoded_short_pulses) +
+                       ((copies == 2U) ? mzf_profile_duplicate_gap : 0U);
         long_pulses = (header_stage ?
-                           MZF_MZ800_LONG_MARK_LONG_PULSES :
-                           MZF_MZ800_SHORT_MARK_LONG_PULSES) +
-                      MZF_MZ800_TAPE_MARK_FINAL_LONG_PULSES +
-                      one_count + byte_count + checksum_ones +
-                      2ULL + MZF_MZ800_TRAILING_LONG_PULSES;
+                           mzf_profile_header_mark_long :
+                           mzf_profile_data_mark_long) +
+                      mzf_profile_final_mark_long +
+                      ((uint64_t)copies *
+                       (encoded_long_pulses +
+                        MZF_MZ800_TRAILING_LONG_PULSES));
 
         stage_ticks = short_pulses * short_period +
                       long_pulses *
@@ -1145,15 +1165,7 @@ static uint16_t mzf_short_high_ticks(void)
             default: return MZF_IC_1_4_SHORT_HIGH_TICKS;
         }
     }
-    if (mzf_normal_speed_divisor == 2U)
-    {
-        return MZF_NORMAL_1_2_SHORT_TICKS;
-    }
-    if (mzf_normal_speed_divisor == 3U)
-    {
-        return MZF_NORMAL_1_3_SHORT_TICKS;
-    }
-    return MZF_SHORT_HIGH_TICKS;
+    return mzf_profile_short_high_ticks;
 }
 
 static uint16_t mzf_short_low_ticks(void)
@@ -1172,15 +1184,7 @@ static uint16_t mzf_short_low_ticks(void)
             default: return MZF_IC_1_4_SHORT_LOW_TICKS;
         }
     }
-    if (mzf_normal_speed_divisor == 2U)
-    {
-        return MZF_NORMAL_1_2_SHORT_TICKS;
-    }
-    if (mzf_normal_speed_divisor == 3U)
-    {
-        return MZF_NORMAL_1_3_SHORT_TICKS;
-    }
-    return MZF_SHORT_LOW_TICKS;
+    return mzf_profile_short_low_ticks;
 }
 
 static uint16_t mzf_long_high_ticks(void)
@@ -1199,15 +1203,7 @@ static uint16_t mzf_long_high_ticks(void)
             default: return MZF_IC_1_4_LONG_HIGH_TICKS;
         }
     }
-    if (mzf_normal_speed_divisor == 2U)
-    {
-        return MZF_NORMAL_1_2_LONG_TICKS;
-    }
-    if (mzf_normal_speed_divisor == 3U)
-    {
-        return MZF_NORMAL_1_3_LONG_TICKS;
-    }
-    return MZF_LONG_HIGH_TICKS;
+    return mzf_profile_long_high_ticks;
 }
 
 static uint16_t mzf_long_low_ticks(void)
@@ -1226,31 +1222,71 @@ static uint16_t mzf_long_low_ticks(void)
             default: return MZF_IC_1_4_LONG_LOW_TICKS;
         }
     }
-    if (mzf_normal_speed_divisor == 2U)
-    {
-        return MZF_NORMAL_1_2_LONG_TICKS;
-    }
-    if (mzf_normal_speed_divisor == 3U)
-    {
-        return MZF_NORMAL_1_3_LONG_TICKS;
-    }
-    return MZF_LONG_LOW_TICKS;
+    return mzf_profile_long_low_ticks;
 }
 
 static void mzf_configure_normal_speed(loader_mode_t loader_mode)
 {
+    mz_tape_profile_id_t profile_id = MZ_TAPE_PROFILE_MZ800_NORMAL_1X;
+    mz_tape_profile_t profile;
+
     if (loader_mode == LOADER_MODE_NORMAL_1_2)
     {
         mzf_normal_speed_divisor = 2U;
+        profile_id = MZ_TAPE_PROFILE_MZ800_NORMAL_2X;
     }
     else if (loader_mode == LOADER_MODE_NORMAL_1_3)
     {
         mzf_normal_speed_divisor = 3U;
+        profile_id = MZ_TAPE_PROFILE_MZ800_NORMAL_3X;
     }
     else
     {
         mzf_normal_speed_divisor = 1U;
     }
+
+    mzf_native_mz700 = (loader_mode == LOADER_MODE_MZ700_1X);
+    if (mzf_native_mz700)
+    {
+        profile_id = MZ_TAPE_PROFILE_MZ700_NORMAL_1X;
+    }
+
+    if (!mz_tape_profile_read(profile_id, &profile))
+    {
+        return;
+    }
+
+    mzf_profile_short_high_ticks = MZF_US_TO_TICKS(profile.short_high_us);
+    mzf_profile_short_low_ticks = MZF_US_TO_TICKS(profile.short_low_us);
+    mzf_profile_long_high_ticks = MZF_US_TO_TICKS(profile.long_high_us);
+    mzf_profile_long_low_ticks = MZF_US_TO_TICKS(profile.long_low_us);
+
+    /* Preserve the measured fractional-tick NORMAL profiles exactly. */
+    if (loader_mode == LOADER_MODE_NORMAL_1_2)
+    {
+        mzf_profile_short_high_ticks = MZF_NORMAL_1_2_SHORT_TICKS;
+        mzf_profile_short_low_ticks = MZF_NORMAL_1_2_SHORT_TICKS;
+        mzf_profile_long_high_ticks = MZF_NORMAL_1_2_LONG_TICKS;
+        mzf_profile_long_low_ticks = MZF_NORMAL_1_2_LONG_TICKS;
+    }
+    else if (loader_mode == LOADER_MODE_NORMAL_1_3)
+    {
+        mzf_profile_short_high_ticks = MZF_NORMAL_1_3_SHORT_TICKS;
+        mzf_profile_short_low_ticks = MZF_NORMAL_1_3_SHORT_TICKS;
+        mzf_profile_long_high_ticks = MZF_NORMAL_1_3_LONG_TICKS;
+        mzf_profile_long_low_ticks = MZF_NORMAL_1_3_LONG_TICKS;
+    }
+
+    mzf_profile_header_leader =
+        (uint16_t)profile.header_leader_short_pulses;
+    mzf_profile_data_leader =
+        (uint16_t)profile.data_leader_short_pulses;
+    mzf_profile_header_mark_long = profile.header_mark_long_pulses;
+    mzf_profile_header_mark_short = profile.header_mark_short_pulses;
+    mzf_profile_data_mark_long = profile.data_mark_long_pulses;
+    mzf_profile_data_mark_short = profile.data_mark_short_pulses;
+    mzf_profile_final_mark_long = profile.final_mark_long_pulses;
+    mzf_profile_duplicate_gap = profile.duplicate_gap_short_pulses;
 }
 
 static void mzf_set_short_pulse(uint16_t *high_ticks, uint16_t *low_ticks)
@@ -1269,11 +1305,7 @@ static uint16_t mzf_gap_short_pulses(void)
 {
     if (mzf_stage == MZF_STAGE_HEADER)
     {
-        if (mzf_normal_speed_divisor == 3U)
-            return MZF_TC_1_3_TURBO_GAP_SHORT_PULSES;
-        if (mzf_normal_speed_divisor == 2U)
-            return MZF_TC_1_2_TURBO_GAP_SHORT_PULSES;
-        return MZF_MZ800_LONG_GAP_SHORT_PULSES;
+        return mzf_profile_header_leader;
     }
     if (mzf_stage == MZF_STAGE_TAPE_TURBO_DATA)
     {
@@ -1287,44 +1319,40 @@ static uint16_t mzf_gap_short_pulses(void)
                 return MZF_IC_TURBO_GAP_SHORT_PULSES;
         }
     }
-    if (mzf_normal_speed_divisor == 3U)
-        return MZF_TC_1_3_TURBO_GAP_SHORT_PULSES;
-    if (mzf_normal_speed_divisor == 2U)
-        return MZF_TC_1_2_TURBO_GAP_SHORT_PULSES;
-    return MZF_MZ800_SHORT_GAP_SHORT_PULSES;
+    return mzf_profile_data_leader;
 }
 
 static uint16_t mzf_mark_long_pulses(void)
 {
     if (mzf_stage == MZF_STAGE_HEADER)
     {
-        return MZF_MZ800_LONG_MARK_LONG_PULSES;
+        return mzf_profile_header_mark_long;
     }
     if (mzf_stage == MZF_STAGE_TAPE_TURBO_DATA)
     {
         return MZF_IC_TURBO_MARK_LONG_PULSES;
     }
-    return MZF_MZ800_SHORT_MARK_LONG_PULSES;
+    return mzf_profile_data_mark_long;
 }
 
 static uint16_t mzf_mark_short_pulses(void)
 {
     if (mzf_stage == MZF_STAGE_HEADER)
     {
-        return MZF_MZ800_LONG_MARK_SHORT_PULSES;
+        return mzf_profile_header_mark_short;
     }
     if (mzf_stage == MZF_STAGE_TAPE_TURBO_DATA)
     {
         return MZF_IC_TURBO_MARK_SHORT_PULSES;
     }
-    return MZF_MZ800_SHORT_MARK_SHORT_PULSES;
+    return mzf_profile_data_mark_short;
 }
 
 static uint16_t mzf_mark_final_long_pulses(void)
 {
     return (mzf_stage == MZF_STAGE_TAPE_TURBO_DATA) ?
         MZF_IC_TURBO_MARK_FINAL_LONG_PULSES :
-        MZF_MZ800_TAPE_MARK_FINAL_LONG_PULSES;
+        mzf_profile_final_mark_long;
 }
 
 static bool mzf_stage_uses_tc_trailing(void)
@@ -1351,6 +1379,9 @@ static void mzf_begin_normal_stage(mzf_stage_t stage)
     mzf_normal_bits_remaining = 0U;
     mzf_normal_checksum_byte_index = 0U;
     mzf_normal_header_preamble = (stage == MZF_STAGE_HEADER);
+    mzf_native_copy_index = 0U;
+    mzf_native_repeat_refill_requested = false;
+    mzf_native_repeat_refill_ready = false;
     mzf_boundary_waiting = false;
     mzf_motor_low_seen = 0U;
     mzf_boundary_auto_timer_armed = false;
@@ -1554,6 +1585,27 @@ static bool mzf_next_normal_pulse_from_isr(uint16_t *high_ticks,
             case MZF_STEP_TRAILING_LONGS:
                 if (mzf_normal_loop == 0U)
                 {
+                    if (mzf_native_mz700 &&
+                        (mzf_profile_duplicate_gap != 0U) &&
+                        (mzf_native_copy_index == 0U) &&
+                        ((mzf_stage == MZF_STAGE_HEADER) ||
+                         (mzf_stage == MZF_STAGE_DATA)))
+                    {
+                        mzf_native_copy_index = 1U;
+                        mzf_normal_loop = mzf_profile_duplicate_gap;
+                        mzf_normal_step = MZF_STEP_DUPLICATE_GAP;
+                        if (mzf_stage == MZF_STAGE_HEADER)
+                        {
+                            mzf_header_offset = 0U;
+                            mzf_native_repeat_refill_ready = true;
+                        }
+                        else
+                        {
+                            mzf_native_repeat_refill_ready = false;
+                            mzf_native_repeat_refill_requested = true;
+                        }
+                        continue;
+                    }
                     mzf_normal_step = MZF_STEP_BOUNDARY;
                     continue;
                 }
@@ -1567,6 +1619,28 @@ static bool mzf_next_normal_pulse_from_isr(uint16_t *high_ticks,
                 }
                 mzf_normal_loop--;
                 return true;
+
+            case MZF_STEP_DUPLICATE_GAP:
+                if (mzf_normal_loop != 0U)
+                {
+                    mzf_set_short_pulse(high_ticks, low_ticks);
+                    mzf_normal_loop--;
+                    return true;
+                }
+                if ((mzf_stage == MZF_STAGE_DATA) &&
+                    !mzf_native_repeat_refill_ready)
+                {
+                    mzf_set_error_from_isr_P(PSTR("MZ7 REFILL"),
+                                             MZF_PLAYBACK_UNDERRUN);
+                    return false;
+                }
+                mzf_normal_bytes_remaining = mzf_stage_byte_count();
+                mzf_normal_checksum = 0U;
+                mzf_normal_checksum_byte_index = 0U;
+                mzf_normal_data = 0U;
+                mzf_normal_bits_remaining = 0U;
+                mzf_normal_step = MZF_STEP_BYTE_LOAD;
+                continue;
 
             case MZF_STEP_BOUNDARY:
                 /*
@@ -1670,6 +1744,47 @@ static bool mzf_prepare_tape_turbo_payload(void)
     mzf_record_data_read = 0UL;
     mzf_fifo_reset();
     return mzf_prefill_data();
+}
+
+/* The first native MZ700 data copy has consumed the FIFO. Rewind the same
+   logical MZF payload while Timer3 emits the 256-short duplicate separator.
+   One bounded refill is enough to make the second copy runnable; normal
+   foreground refill continues during the separator and payload. */
+static bool mzf_prepare_native_mz700_repeat(void)
+{
+    bool requested;
+
+    ATOMIC_BLOCK(ATOMIC_RESTORESTATE)
+    {
+        requested = mzf_native_repeat_refill_requested;
+        if (requested)
+        {
+            mzf_native_repeat_refill_requested = false;
+        }
+    }
+    if (!requested)
+    {
+        return true;
+    }
+
+    if (!sdcard_file_seek(mzf_record_data_file_start))
+    {
+        mzf_set_error_P(PSTR("MZ7 SEEK"), MZF_PLAYBACK_IO_ERROR);
+        return false;
+    }
+
+    mzf_record_data_read = 0UL;
+    mzf_fifo_reset();
+    if ((mzf_record_data_length != 0UL) && !mzf_refill_data_once())
+    {
+        return false;
+    }
+
+    ATOMIC_BLOCK(ATOMIC_RESTORESTATE)
+    {
+        mzf_native_repeat_refill_ready = true;
+    }
+    return true;
 }
 
 static bool mzf_start_next_mzt_record(void)
@@ -1881,6 +1996,7 @@ void mzf_playback_init(void)
     mzf_total_duration_ms = 0UL;
     mzf_record_data_length = 0UL;
     mzf_record_data_file_end = 0UL;
+    mzf_record_data_file_start = 0UL;
     mzf_record_data_read = 0UL;
     mzf_original_data_offset = 0UL;
     mzf_original_data_length = 0UL;
@@ -1899,6 +2015,9 @@ void mzf_playback_init(void)
     mzf_pwm_current_compare_ticks = 1U;
     mzf_pwm_next_compare_ticks = 1U;
     mzf_pwm_terminal_pending = MZF_PWM_TERMINAL_NONE;
+    mzf_native_copy_index = 0U;
+    mzf_native_repeat_refill_requested = false;
+    mzf_native_repeat_refill_ready = false;
     mzf_fifo_reset();
     mzf_loader_reset();
 }
@@ -2085,9 +2204,13 @@ void mzf_playback_stop(void)
     mzf_configure_normal_speed(LOADER_MODE_NORMAL_1_1);
     mzf_record_data_length = 0UL;
     mzf_record_data_file_end = 0UL;
+    mzf_record_data_file_start = 0UL;
     mzf_record_data_read = 0UL;
     mzf_original_data_offset = 0UL;
     mzf_original_data_length = 0UL;
+    mzf_native_copy_index = 0U;
+    mzf_native_repeat_refill_requested = false;
+    mzf_native_repeat_refill_ready = false;
     mzf_loader_reset();
     mz_sense_set(true);
 }
@@ -2116,6 +2239,18 @@ void mzf_playback_service(void)
         {
             mzf_state = MZF_PLAYBACK_FINISHED;
             mz_sense_set(true);
+        }
+        return;
+    }
+
+    if (mzf_native_mz700 &&
+        (mzf_stage == MZF_STAGE_DATA) &&
+        mzf_native_repeat_refill_requested &&
+        !mzf_prepare_native_mz700_repeat())
+    {
+        if (mzf_state == MZF_PLAYBACK_RUNNING)
+        {
+            mzf_set_error_P(PSTR("MZ7 REFILL"), MZF_PLAYBACK_IO_ERROR);
         }
         return;
     }

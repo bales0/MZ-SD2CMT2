@@ -91,7 +91,7 @@ bool sdcard_ensure_directory(const char *directory_path);
 
 /*
     Finds the next shared RECxxxx sequence number in directory_path. Files
-    REC0001.WAV, REC0001.LEP and REC0001.L16 share one namespace, so the
+    REC0001.WAV, REC0001.LEP, REC0001.L16 and REC0001.MZF share one namespace, so the
     result is one greater than the highest compatible existing number.
 */
 bool sdcard_next_record_sequence(const char *directory_path,

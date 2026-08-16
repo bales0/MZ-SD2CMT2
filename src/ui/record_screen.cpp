@@ -22,6 +22,13 @@ static const char text_file_deleted[] PROGMEM = "FILE DELETED";
 static const char text_rec_cancelled[] PROGMEM = "REC CANCELLED";
 static const char text_rec_error[] PROGMEM = "REC ERROR";
 
+#define RECORD_NAME_SCROLL_START_HOLD_MS 1200UL
+#define RECORD_NAME_SCROLL_STEP_MS 300UL
+#define RECORD_NAME_SCROLL_END_HOLD_MS 800UL
+
+static bool live_name_scroll_active = false;
+static uint32_t live_name_scroll_started_ms = 0UL;
+
 static void line(uint8_t row, const char *text)
 {
     char output[17];
@@ -52,6 +59,46 @@ static void copy_filename_line(char *destination, const char *filename)
     {
         destination[i] = filename[i];
         if (filename[i] == '\0') return;
+    }
+    destination[16] = '\0';
+}
+
+/* Time-derived scrolling has no delays and needs no extra persistent buffer. */
+static void copy_scrolling_name(char *destination, const char *name)
+{
+    uint8_t length = 0U;
+    uint8_t offset = 0U;
+    while ((length < 63U) && (name[length] != '\0')) ++length;
+    if (length <= 16U)
+    {
+        copy_filename_line(destination, name);
+        return;
+    }
+
+    if (!live_name_scroll_active)
+    {
+        live_name_scroll_active = true;
+        live_name_scroll_started_ms = millis();
+    }
+    {
+        uint8_t maximum_offset = (uint8_t)(length - 16U);
+        uint32_t travel_ms = (uint32_t)maximum_offset *
+                             RECORD_NAME_SCROLL_STEP_MS;
+        uint32_t cycle_ms = RECORD_NAME_SCROLL_START_HOLD_MS + travel_ms +
+                            RECORD_NAME_SCROLL_END_HOLD_MS;
+        uint32_t elapsed = (millis() - live_name_scroll_started_ms) % cycle_ms;
+        if (elapsed >= RECORD_NAME_SCROLL_START_HOLD_MS)
+        {
+            elapsed -= RECORD_NAME_SCROLL_START_HOLD_MS;
+            offset = (elapsed >= travel_ms) ? maximum_offset :
+                (uint8_t)(1UL + elapsed / RECORD_NAME_SCROLL_STEP_MS);
+            if (offset > maximum_offset) offset = maximum_offset;
+        }
+    }
+    for (uint8_t column = 0U; column < 16U; ++column)
+    {
+        uint8_t index = (uint8_t)(offset + column);
+        destination[column] = (index < length) ? name[index] : ' ';
     }
     destination[16] = '\0';
 }
@@ -126,6 +173,7 @@ void record_screen_render(void)
 {
     record_engine_state_t state = record_engine_get_state();
     const char *filename = record_engine_get_filename();
+    const char *live_name = record_engine_get_live_name();
     char line0[17];
     char line1[17];
     char filename_copy[17];
@@ -143,6 +191,15 @@ void record_screen_render(void)
         copy_filename_line(line0, filename);
     }
     copy_filename_line(filename_copy, filename);
+
+    if (live_name == NULL) live_name_scroll_active = false;
+
+    if ((live_name != NULL) &&
+        ((state == RECORD_ENGINE_RECORDING) ||
+         (state == RECORD_ENGINE_PAUSED)))
+    {
+        copy_scrolling_name(line0, live_name);
+    }
 
     switch (state)
     {

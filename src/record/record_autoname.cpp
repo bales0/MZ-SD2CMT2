@@ -5,23 +5,23 @@
 #include <string.h>
 
 #include "record_path_buffer.h"
+#include "../formats/mz_tape_decoder.h"
 #include "../drivers/flash_text.h"
 #include "../drivers/sdcard.h"
 #include "../streams/wav_sample_stream.h"
 
-#define AUTONAME_HEADER_BYTES 128U
 #define AUTONAME_NAME_BYTES 17U
-#define AUTONAME_DECODER_COUNT 2U
-/* Fast header variants use a shorter leader and a 20-pulse tape mark;
-   standard ROM headers use 40 mark pulses.  The full-header checksum is the
-   final guard against a false short-leader match. */
+#define AUTONAME_MAX_SUFFIX 99U
+
+/* Legacy local decoder helpers below are retained only as dead translation
+   unit code while AutoName now uses the shared neutral decoder.  They own no
+   instance buffers and are removed by section garbage collection. */
+#define AUTONAME_HEADER_BYTES 128U
 #define AUTONAME_MIN_LEADER_PULSES 16U
 #define AUTONAME_MIN_MARK_PULSES 12U
 #define AUTONAME_MAX_MARK_PULSES 48U
 #define AUTONAME_FINAL_MARK_PULSES 2U
 #define AUTONAME_MAX_HALF_UNITS 1024U
-#define AUTONAME_MAX_SUFFIX 99U
-
 typedef enum
 {
     AUTONAME_SEARCH_LEADER = 0,
@@ -30,7 +30,6 @@ typedef enum
     AUTONAME_MARK_FINAL,
     AUTONAME_DATA
 } autoname_decode_state_t;
-
 typedef struct
 {
     autoname_decode_state_t state;
@@ -48,21 +47,13 @@ typedef struct
 
 static bool autoname_enabled = false;
 static bool autoname_found = false;
-static autoname_decoder_t autoname_decoders[AUTONAME_DECODER_COUNT];
 static char autoname_name[AUTONAME_NAME_BYTES + 1U];
-
-/* Every two adjacent half intervals form a pulse for one of two possible
-   phases.  Trying both phases makes the decoder polarity-independent and,
-   unlike half-by-half classification, lets 22 kHz WAV and 50 us LEP resolve
-   fast asymmetric pulses from their unambiguous full duration. */
-static bool autoname_have_previous_half = false;
-static uint16_t autoname_previous_half = 0U;
-static uint8_t autoname_pair_decoder = 0U;
 
 /* WAV-only run accumulator. Packed source bytes are bit 0 first. */
 static bool autoname_sample_active = false;
 static uint8_t autoname_sample_level = 0U;
 static uint16_t autoname_sample_run = 0U;
+static uint8_t autoname_implicit_level = 0U;
 
 /* Complete Sharp MZ-80A character-code to ASCII map. Unsupported graphical
    characters become spaces. Kept in flash so AUTONAME uses no extra SRAM.
@@ -105,6 +96,7 @@ static const uint8_t sharp_mz_to_ascii_P[256] PROGMEM = {
 static_assert(sizeof(sharp_mz_to_ascii_P) == 256U,
               "Sharp MZ character map must contain all 256 codes");
 
+#if 0
 static void autoname_decoder_reset(autoname_decoder_t *decoder,
                                    uint16_t seed_units)
 {
@@ -185,6 +177,8 @@ static uint8_t autoname_popcount8(uint8_t value)
     return count;
 }
 
+#endif
+
 static bool autoname_safe_ascii(uint8_t value)
 {
     return ((value >= 'A') && (value <= 'Z')) ||
@@ -250,6 +244,7 @@ static bool autoname_sanitize(void)
     return have_alnum && (output != 0U);
 }
 
+#if 0
 static void autoname_accept_byte(autoname_decoder_t *decoder, uint8_t value)
 {
     if (decoder->byte_index < AUTONAME_HEADER_BYTES)
@@ -415,34 +410,40 @@ static void autoname_feed_pulse(autoname_decoder_t *decoder,
     autoname_accept_data_pulse(decoder, (uint8_t)pulse_class);
 }
 
+#endif
+
+void record_autoname_accept_header(const uint8_t *header)
+{
+    if (!autoname_enabled || autoname_found || (header == NULL)) return;
+    memcpy(autoname_name, &header[1], AUTONAME_NAME_BYTES);
+    autoname_name[AUTONAME_NAME_BYTES] = '\0';
+    autoname_found = autoname_sanitize();
+}
+
+static void autoname_take_decoder_event(void)
+{
+    mz_tape_decoder_event_t event;
+    if (mz_tape_decoder_take_event(&event) &&
+        (event.type == MZ_TAPE_DECODER_EVENT_HEADER_VALID))
+    {
+        record_autoname_accept_header(mz_tape_decoder_get_header());
+        mz_tape_decoder_stop();
+    }
+}
+
+void record_autoname_feed_level_interval(uint16_t duration_units,
+                                         uint8_t level)
+{
+    if (!autoname_enabled || autoname_found) return;
+    mz_tape_decoder_feed_interval(duration_units, level);
+    autoname_take_decoder_event();
+}
+
 void record_autoname_feed_interval(uint16_t duration_units)
 {
-    uint16_t pulse_units;
-
-    if (!autoname_enabled || autoname_found)
-    {
-        return;
-    }
-    if ((duration_units == 0U) ||
-        (duration_units > AUTONAME_MAX_HALF_UNITS))
-    {
-        record_autoname_break_signal();
-        return;
-    }
-
-    if (!autoname_have_previous_half)
-    {
-        autoname_previous_half = duration_units;
-        autoname_have_previous_half = true;
-        autoname_pair_decoder = 0U;
-        return;
-    }
-
-    pulse_units = (uint16_t)(autoname_previous_half + duration_units);
-    autoname_feed_pulse(&autoname_decoders[autoname_pair_decoder],
-                        pulse_units);
-    autoname_pair_decoder ^= 1U;
-    autoname_previous_half = duration_units;
+    record_autoname_feed_level_interval(duration_units,
+                                        autoname_implicit_level);
+    autoname_implicit_level ^= 1U;
 }
 
 void record_autoname_begin(bool enabled)
@@ -452,14 +453,10 @@ void record_autoname_begin(bool enabled)
     autoname_sample_active = false;
     autoname_sample_level = 0U;
     autoname_sample_run = 0U;
-    autoname_have_previous_half = false;
-    autoname_previous_half = 0U;
-    autoname_pair_decoder = 0U;
+    autoname_implicit_level = 0U;
     autoname_name[0] = '\0';
-    for (uint8_t i = 0U; i < AUTONAME_DECODER_COUNT; ++i)
-    {
-        autoname_decoder_reset(&autoname_decoders[i], 0U);
-    }
+    if (enabled) mz_tape_decoder_begin_header();
+    else mz_tape_decoder_stop();
 }
 
 void record_autoname_break_signal(void)
@@ -470,13 +467,8 @@ void record_autoname_break_signal(void)
     }
     autoname_sample_active = false;
     autoname_sample_run = 0U;
-    autoname_have_previous_half = false;
-    autoname_previous_half = 0U;
-    autoname_pair_decoder = 0U;
-    for (uint8_t i = 0U; i < AUTONAME_DECODER_COUNT; ++i)
-    {
-        autoname_decoder_reset(&autoname_decoders[i], 0U);
-    }
+    autoname_implicit_level = 0U;
+    mz_tape_decoder_break_signal();
 }
 
 void record_autoname_feed_packed_samples(uint8_t packed, uint8_t valid_bits)
@@ -508,7 +500,8 @@ void record_autoname_feed_packed_samples(uint8_t packed, uint8_t valid_bits)
         }
         else
         {
-            record_autoname_feed_interval(autoname_sample_run);
+            record_autoname_feed_level_interval(autoname_sample_run,
+                                                autoname_sample_level);
             autoname_sample_level = level;
             autoname_sample_run = 1U;
         }
@@ -540,6 +533,10 @@ static int autoname_make_path(char *destination,
             return flash_text_snprintf(destination, RECORD_PATH_BUFFER_MAX,
                                        PSTR("%s/%s.L16"), directory_path,
                                        autoname_name);
+        if (format == FILE_FORMAT_MZF)
+            return flash_text_snprintf(destination, RECORD_PATH_BUFFER_MAX,
+                                       PSTR("%s/%s.MZF"), directory_path,
+                                       autoname_name);
         return flash_text_snprintf(destination, RECORD_PATH_BUFFER_MAX,
                                    PSTR("%s/%s.LEP"), directory_path,
                                    autoname_name);
@@ -553,6 +550,10 @@ static int autoname_make_path(char *destination,
         return flash_text_snprintf(destination, RECORD_PATH_BUFFER_MAX,
                                    PSTR("%s/%s_%02u.L16"), directory_path,
                                    autoname_name, (unsigned int)suffix);
+    if (format == FILE_FORMAT_MZF)
+        return flash_text_snprintf(destination, RECORD_PATH_BUFFER_MAX,
+                                   PSTR("%s/%s_%02u.MZF"), directory_path,
+                                   autoname_name, (unsigned int)suffix);
     return flash_text_snprintf(destination, RECORD_PATH_BUFFER_MAX,
                                PSTR("%s/%s_%02u.LEP"), directory_path,
                                autoname_name, (unsigned int)suffix);
@@ -565,7 +566,8 @@ bool record_autoname_apply(const char *directory_path, file_format_t format)
 
     if (!record_autoname_has_name() || (directory_path == NULL) ||
         ((format != FILE_FORMAT_WAV) && (format != FILE_FORMAT_L16) &&
-         (format != FILE_FORMAT_LEP)) || sdcard_file_is_open())
+         (format != FILE_FORMAT_LEP) && (format != FILE_FORMAT_MZF)) ||
+        sdcard_file_is_open())
     {
         return false;
     }

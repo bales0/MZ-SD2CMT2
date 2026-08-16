@@ -38,12 +38,14 @@ record_engine_state_t record_engine_get_state(void);
 file_format_t record_engine_get_format(void);
 record_control_mode_t record_engine_get_control_mode(void);
 const char *record_engine_get_filename(void);
+/* Sanitized decoded MZ title while AUTONAME is enabled, otherwise NULL. */
+const char *record_engine_get_live_name(void);
 const char *record_engine_get_error_text(void);
 bool record_engine_cancelled_file_removed(void);
 uint8_t record_engine_get_buffer_fill_percent(void);
 uint32_t record_engine_get_elapsed_seconds(void);
 
-/* Returns the configured WAV sample rate, or 0 for LEP/L16 recording. */
+/* Returns the configured WAV sample rate, or 0 for LEP/L16/MZF recording. */
 uint32_t record_engine_get_wav_sample_rate(void);
 
 /* Returns 'M' for MOTOR pause, 'U' for user pause, or '\0' when not paused. */

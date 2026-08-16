@@ -18,6 +18,7 @@ typedef enum
     LOADER_MODE_TC_1_2,
     LOADER_MODE_NORMAL_1_2,
     LOADER_MODE_NORMAL_1_3,
+    LOADER_MODE_MZ700_1X,
     LOADER_MODE_COUNT
 } loader_mode_t;
 

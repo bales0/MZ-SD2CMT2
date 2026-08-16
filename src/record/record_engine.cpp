@@ -5,6 +5,7 @@
 
 #include "wav_record_engine.h"
 #include "edge_record_engine.h"
+#include "mzf_record_engine.h"
 #include "record_autoname.h"
 #include "../drivers/mzio.h"
 #include "../drivers/write_edge_monitor.h"
@@ -87,6 +88,10 @@ static bool record_engine_begin_capture(void)
     {
         ok = edge_record_engine_start(engine_directory, engine_config.format);
     }
+    else if (engine_config.format == FILE_FORMAT_MZF)
+    {
+        ok = mzf_record_engine_start(engine_directory);
+    }
     else
     {
         record_engine_set_error_P(PSTR("REC FORMAT"));
@@ -96,7 +101,10 @@ static bool record_engine_begin_capture(void)
     if (!ok)
     {
         const char *error = (engine_config.format == FILE_FORMAT_WAV) ?
-            wav_record_engine_get_error_text() : edge_record_engine_get_error_text();
+            wav_record_engine_get_error_text() :
+            (engine_config.format == FILE_FORMAT_MZF) ?
+                mzf_record_engine_get_error_text() :
+                edge_record_engine_get_error_text();
         record_engine_set_error(error);
         return false;
     }
@@ -136,7 +144,8 @@ static bool record_engine_pause_capture(void)
     }
     else
     {
-        ok = edge_record_engine_pause();
+        ok = (engine_config.format == FILE_FORMAT_MZF) ?
+            mzf_record_engine_pause() : edge_record_engine_pause();
     }
     if (!ok)
     {
@@ -166,7 +175,8 @@ static bool record_engine_resume_capture(void)
     }
     else
     {
-        ok = edge_record_engine_resume();
+        ok = (engine_config.format == FILE_FORMAT_MZF) ?
+            mzf_record_engine_resume() : edge_record_engine_resume();
     }
     if (!ok)
     {
@@ -227,6 +237,7 @@ void record_engine_init(void)
 {
     wav_record_engine_init();
     edge_record_engine_init();
+    mzf_record_engine_init();
     engine_state = RECORD_ENGINE_STOPPED;
     engine_config.format = FILE_FORMAT_WAV;
     engine_config.wav_sample_rate = 44100UL;
@@ -290,12 +301,18 @@ bool record_engine_start(const char *directory_path, const record_engine_config_
     {
         bool preview_ok = (engine_config.format == FILE_FORMAT_WAV) ?
             wav_record_engine_preview_filename(engine_directory) :
-            edge_record_engine_preview_filename(engine_directory, engine_config.format);
+            (engine_config.format == FILE_FORMAT_MZF) ?
+                mzf_record_engine_preview_filename(engine_directory) :
+                edge_record_engine_preview_filename(engine_directory,
+                                                    engine_config.format);
 
         if (!preview_ok)
         {
             const char *error = (engine_config.format == FILE_FORMAT_WAV) ?
-                wav_record_engine_get_error_text() : edge_record_engine_get_error_text();
+                wav_record_engine_get_error_text() :
+                (engine_config.format == FILE_FORMAT_MZF) ?
+                    mzf_record_engine_get_error_text() :
+                    edge_record_engine_get_error_text();
             record_engine_set_error(error);
             return false;
         }
@@ -411,6 +428,29 @@ void record_engine_service(void)
             default: break;
         }
     }
+    else if (engine_config.format == FILE_FORMAT_MZF)
+    {
+        mzf_record_engine_service();
+        switch (mzf_record_engine_get_state())
+        {
+            case MZF_RECORD_ENGINE_FINALIZING: engine_state = RECORD_ENGINE_FINALIZING; break;
+            case MZF_RECORD_ENGINE_FINISHED:
+                record_engine_finish_capture();
+                break;
+            case MZF_RECORD_ENGINE_ERROR:
+                record_engine_set_error(mzf_record_engine_get_error_text());
+                break;
+            case MZF_RECORD_ENGINE_PAUSED: engine_state = RECORD_ENGINE_PAUSED; break;
+            case MZF_RECORD_ENGINE_RECORDING:
+                if (engine_state != RECORD_ENGINE_FINALIZING)
+                {
+                    engine_state = RECORD_ENGINE_RECORDING;
+                    record_engine_clear_pause_reason();
+                }
+                break;
+            default: break;
+        }
+    }
 }
 
 void record_engine_toggle_pause(void)
@@ -452,7 +492,10 @@ void record_engine_request_stop(void)
         }
         else
         {
-            edge_record_engine_request_stop();
+            if (engine_config.format == FILE_FORMAT_MZF)
+                mzf_record_engine_request_stop();
+            else
+                edge_record_engine_request_stop();
         }
         engine_state = RECORD_ENGINE_FINALIZING;
         record_engine_clear_pause_reason();
@@ -475,6 +518,10 @@ void record_engine_cancel(void)
         {
             edge_record_engine_cancel();
         }
+        else if (engine_config.format == FILE_FORMAT_MZF)
+        {
+            mzf_record_engine_cancel();
+        }
     }
 
     /* Keep the result visible; short LEFT acknowledges it and returns. */
@@ -491,7 +538,9 @@ record_control_mode_t record_engine_get_control_mode(void) { return engine_confi
 const char *record_engine_get_filename(void)
 {
     const char *name = (engine_config.format == FILE_FORMAT_WAV) ?
-        wav_record_engine_get_filename() : edge_record_engine_get_filename();
+        wav_record_engine_get_filename() :
+        (engine_config.format == FILE_FORMAT_MZF) ?
+            mzf_record_engine_get_filename() : edge_record_engine_get_filename();
 
     return (name != NULL && name[0] != '\0') ? name : NULL;
 }
@@ -502,7 +551,14 @@ uint8_t record_engine_get_buffer_fill_percent(void)
     if (!capture_started) return 100U;
     return (engine_config.format == FILE_FORMAT_WAV) ?
         (uint8_t)(100U - wav_record_engine_get_buffer_fill_percent()) :
-        edge_record_engine_get_buffer_headroom_percent();
+        (engine_config.format == FILE_FORMAT_MZF) ?
+            mzf_record_engine_get_buffer_headroom_percent() :
+            edge_record_engine_get_buffer_headroom_percent();
+}
+
+const char *record_engine_get_live_name(void)
+{
+    return engine_config.autoname ? record_autoname_get_name() : NULL;
 }
 uint32_t record_engine_get_elapsed_seconds(void)
 {
