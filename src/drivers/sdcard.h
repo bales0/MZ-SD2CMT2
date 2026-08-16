@@ -121,6 +121,8 @@ void sdcard_file_close(void);
 
 /* Remove a closed file. Used after cancelled or failed recording. */
 bool sdcard_file_remove(const char *path);
+/* Rename a closed file without replacing an existing destination. */
+bool sdcard_file_rename(const char *old_path, const char *new_path);
 
 const char *sdcard_last_error(void);
 uint8_t sdcard_last_error_code(void);

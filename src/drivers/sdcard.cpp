@@ -1368,6 +1368,33 @@ bool sdcard_file_remove(const char *path)
     return true;
 }
 
+bool sdcard_file_rename(const char *old_path, const char *new_path)
+{
+    if ((old_path == NULL) || (new_path == NULL) || !sdcard_mounted ||
+        sdcard_stream_file.isOpen())
+    {
+        sdcard_set_error_P(PSTR("BAD RENAME"));
+        return false;
+    }
+    if (sd.exists(new_path))
+    {
+        sdcard_set_error_P(PSTR("FILE EXISTS"));
+        return false;
+    }
+    if (!sd.rename(old_path, new_path))
+    {
+        if (!sdcard_probe_present())
+        {
+            return false;
+        }
+        sdcard_set_error_P(PSTR("RENAME FAIL"));
+        return false;
+    }
+
+    sdcard_set_error_P(PSTR("OK"));
+    return true;
+}
+
 uint16_t sdcard_count_root_entries(uint16_t max_entries)
 {
     const char root_path[2] = { '/', '\0' };

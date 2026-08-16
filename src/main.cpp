@@ -163,6 +163,7 @@ static void app_enter_record(void)
     config.format = record_menu_get_format();
     config.wav_sample_rate = record_menu_get_wav_sample_rate();
     config.control_mode = record_menu_get_control_mode();
+    config.autoname = record_menu_get_autoname();
     (void)record_engine_start(recordings_directory, &config);
     current_screen = APP_SCREEN_RECORD;
     lcd_clear();

@@ -9,6 +9,7 @@
 #include "../streams/wav_sample_stream.h"
 #include "../drivers/flash_text.h"
 #include "record_path_buffer.h"
+#include "record_autoname.h"
 
 /* 64 packed bytes expand exactly to one 512-byte PCM sector. */
 #define WAV_RECORD_RAW_BLOCK_BYTES 64U
@@ -190,6 +191,11 @@ static bool wav_record_expand_and_write(uint16_t raw_count)
         return false;
     }
 
+    for (uint16_t byte_index = 0U; byte_index < raw_count; ++byte_index)
+    {
+        record_autoname_feed_packed_samples(wav_record_work_block[byte_index], 8U);
+    }
+
     for (uint16_t byte_index = raw_count; byte_index != 0U; byte_index--)
     {
         uint16_t input_index = (uint16_t)(byte_index - 1U);
@@ -266,6 +272,8 @@ static bool wav_record_write_final_tail(void)
     {
         return true;
     }
+
+    record_autoname_feed_packed_samples(final_tail_byte, final_tail_bits);
 
     for (uint8_t bit = 0U; bit < final_tail_bits; bit++)
     {

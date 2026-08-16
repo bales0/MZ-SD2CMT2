@@ -9,6 +9,7 @@ typedef enum
 {
     RECORD_MENU_ITEM_TYPE = 0,
     RECORD_MENU_ITEM_CONTROL,
+    RECORD_MENU_ITEM_AUTONAME,
     RECORD_MENU_ITEM_COUNT
 } record_menu_item_t;
 
@@ -25,9 +26,13 @@ typedef enum
 static record_menu_item_t selected_item = RECORD_MENU_ITEM_TYPE;
 static record_type_t record_type = RECORD_TYPE_WAV_44K;
 static record_control_mode_t control_mode = RECORD_CONTROL_MOTOR;
+static bool autoname = false;
 
 static const char text_rec_type[] PROGMEM = ">REC TYPE";
 static const char text_rec_mode[] PROGMEM = ">REC MODE";
+static const char text_autoname[] PROGMEM = ">AUTONAME";
+static const char text_off[] PROGMEM = "OFF";
+static const char text_on[] PROGMEM = "ON";
 static const char text_motor[] PROGMEM = "MOTOR";
 static const char text_auto[] PROGMEM = "AUTO";
 static const char text_manual[] PROGMEM = "MANUAL";
@@ -97,11 +102,15 @@ static void toggle_current(void)
         record_type = (record_type_t)(((uint8_t)record_type + 1U) %
                                       (uint8_t)RECORD_TYPE_COUNT);
     }
-    else
+    else if (selected_item == RECORD_MENU_ITEM_CONTROL)
     {
         control_mode = (control_mode == RECORD_CONTROL_MOTOR) ? RECORD_CONTROL_AUTO :
                        (control_mode == RECORD_CONTROL_AUTO) ? RECORD_CONTROL_MANUAL :
                                                                RECORD_CONTROL_MOTOR;
+    }
+    else
+    {
+        autoname = !autoname;
     }
 }
 
@@ -110,6 +119,7 @@ void record_menu_init(void)
     selected_item = RECORD_MENU_ITEM_TYPE;
     record_type = RECORD_TYPE_WAV_44K;
     control_mode = RECORD_CONTROL_MOTOR;
+    autoname = false;
 }
 
 record_menu_action_t record_menu_handle_event(button_event_t event)
@@ -118,10 +128,14 @@ record_menu_action_t record_menu_handle_event(button_event_t event)
     {
         case BUTTON_EVENT_UP_PRESS:
         case BUTTON_EVENT_UP_REPEAT:
+            selected_item = (record_menu_item_t)
+                (((uint8_t)selected_item + (uint8_t)RECORD_MENU_ITEM_COUNT - 1U) %
+                 (uint8_t)RECORD_MENU_ITEM_COUNT);
+            break;
         case BUTTON_EVENT_DOWN_PRESS:
         case BUTTON_EVENT_DOWN_REPEAT:
-            selected_item = (selected_item == RECORD_MENU_ITEM_TYPE) ?
-                RECORD_MENU_ITEM_CONTROL : RECORD_MENU_ITEM_TYPE;
+            selected_item = (record_menu_item_t)
+                (((uint8_t)selected_item + 1U) % (uint8_t)RECORD_MENU_ITEM_COUNT);
             break;
         case BUTTON_EVENT_SELECT_SHORT:
             toggle_current();
@@ -143,8 +157,14 @@ void record_menu_render(void)
         lcd_value_line_P(record_type_label_P());
         return;
     }
-    lcd_line_P(0U, text_rec_mode);
-    lcd_value_line_P(record_control_mode_label_P(control_mode));
+    if (selected_item == RECORD_MENU_ITEM_CONTROL)
+    {
+        lcd_line_P(0U, text_rec_mode);
+        lcd_value_line_P(record_control_mode_label_P(control_mode));
+        return;
+    }
+    lcd_line_P(0U, text_autoname);
+    lcd_value_line_P(autoname ? text_on : text_off);
 }
 
 file_format_t record_menu_get_format(void)
@@ -159,3 +179,4 @@ uint32_t record_menu_get_wav_sample_rate(void)
 }
 
 record_control_mode_t record_menu_get_control_mode(void) { return control_mode; }
+bool record_menu_get_autoname(void) { return autoname; }

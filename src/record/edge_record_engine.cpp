@@ -9,6 +9,7 @@
 #include "../streams/cmt_mode_scratch.h"
 #include "../drivers/flash_text.h"
 #include "record_path_buffer.h"
+#include "record_autoname.h"
 
 #define EDGE_RECORD_STAGE_BYTES 512U
 #define EDGE_RECORD_FINAL_PREALLOCATE_BYTES (2UL * 1024UL * 1024UL)
@@ -194,6 +195,7 @@ static bool edge_record_begin_interval(uint8_t units)
     }
 
     output_interval_units = units;
+    record_autoname_feed_interval(units);
     output_interval_level = output_level;
     output_level ^= 1U;
     output_interval_active = true;
@@ -285,6 +287,7 @@ static bool edge_record_accept_long_block(void)
 {
     if (!output_long_active)
     {
+        record_autoname_break_signal();
         output_long_active = true;
         output_long_level = output_level;
         output_long_placeholder_emitted = false;

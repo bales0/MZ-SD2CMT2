@@ -23,6 +23,7 @@ typedef struct
     file_format_t format;
     uint32_t wav_sample_rate;
     record_control_mode_t control_mode;
+    bool autoname;
 } record_engine_config_t;
 
 void record_engine_init(void);

@@ -5,12 +5,14 @@
 
 #include "wav_record_engine.h"
 #include "edge_record_engine.h"
+#include "record_autoname.h"
 #include "../drivers/mzio.h"
 #include "../drivers/write_edge_monitor.h"
 #include "../drivers/flash_text.h"
 
 static record_engine_state_t engine_state = RECORD_ENGINE_STOPPED;
-static record_engine_config_t engine_config = { FILE_FORMAT_WAV, 44100UL, RECORD_CONTROL_MOTOR };
+static record_engine_config_t engine_config =
+    { FILE_FORMAT_WAV, 44100UL, RECORD_CONTROL_MOTOR, false };
 /* The caller owns this stable path while a Record session is active. */
 static const char *engine_directory = NULL;
 static char engine_error[17];
@@ -74,6 +76,8 @@ static bool record_engine_begin_capture(void)
     {
         return true;
     }
+
+    record_autoname_begin(engine_config.autoname);
 
     if (engine_config.format == FILE_FORMAT_WAV)
     {
@@ -140,6 +144,11 @@ static bool record_engine_pause_capture(void)
         return false;
     }
     pause_started_ms = millis();
+    /* Both record engines keep draining their already captured FIFO while
+       paused.  Do not reset AUTONAME here: the end of a NORMAL header can
+       still be waiting in that FIFO when the MZ drops MOTOR.  Captured WAV
+       samples and edge intervals are intentionally concatenated across a
+       pause, so preserving the decoder state matches the saved file. */
     engine_state = RECORD_ENGINE_PAUSED;
     return true;
 }
@@ -222,6 +231,7 @@ void record_engine_init(void)
     engine_config.format = FILE_FORMAT_WAV;
     engine_config.wav_sample_rate = 44100UL;
     engine_config.control_mode = RECORD_CONTROL_MOTOR;
+    engine_config.autoname = false;
     engine_directory = NULL;
     engine_error[0] = '\0';
     capture_started = false;
@@ -232,6 +242,26 @@ void record_engine_init(void)
     cancelled_file_removed = false;
     auto_last_edge_count = 0U;
     auto_last_activity_ms = 0UL;
+    write_edge_monitor_stop();
+    mz_sense_set(true);
+    record_autoname_begin(false);
+}
+
+static void record_engine_finish_capture(void)
+{
+    if (engine_state == RECORD_ENGINE_FINISHED)
+    {
+        return;
+    }
+
+    if (engine_config.autoname)
+    {
+        /* AUTONAME is cosmetic. A failed rename deliberately leaves the
+           completely saved RECxxxx file intact. */
+        (void)record_autoname_apply(engine_directory, engine_config.format);
+    }
+    engine_state = RECORD_ENGINE_FINISHED;
+    record_engine_clear_pause_reason();
     write_edge_monitor_stop();
     mz_sense_set(true);
 }
@@ -346,10 +376,7 @@ void record_engine_service(void)
         {
             case WAV_RECORD_ENGINE_FINALIZING: engine_state = RECORD_ENGINE_FINALIZING; break;
             case WAV_RECORD_ENGINE_FINISHED:
-                engine_state = RECORD_ENGINE_FINISHED;
-                record_engine_clear_pause_reason();
-                write_edge_monitor_stop();
-                mz_sense_set(true);
+                record_engine_finish_capture();
                 break;
             case WAV_RECORD_ENGINE_ERROR: record_engine_set_error(wav_record_engine_get_error_text()); break;
             case WAV_RECORD_ENGINE_PAUSED: engine_state = RECORD_ENGINE_PAUSED; break;
@@ -370,10 +397,7 @@ void record_engine_service(void)
         {
             case EDGE_RECORD_ENGINE_FINALIZING: engine_state = RECORD_ENGINE_FINALIZING; break;
             case EDGE_RECORD_ENGINE_FINISHED:
-                engine_state = RECORD_ENGINE_FINISHED;
-                record_engine_clear_pause_reason();
-                write_edge_monitor_stop();
-                mz_sense_set(true);
+                record_engine_finish_capture();
                 break;
             case EDGE_RECORD_ENGINE_ERROR: record_engine_set_error(edge_record_engine_get_error_text()); break;
             case EDGE_RECORD_ENGINE_PAUSED: engine_state = RECORD_ENGINE_PAUSED; break;

@@ -78,11 +78,7 @@
 #define MZF_TC_1_2_LONG_LOW_TICKS   MZF_US_TO_TICKS(288U)
 
 #define MZF_MZ800_LONG_GAP_SHORT_PULSES 6344U
-#define MZF_MZ800_SHORT_GAP_SHORT_PULSES 3172U
-#define MZF_NORMAL_1_2_LONG_GAP_SHORT_PULSES 11239U
-#define MZF_NORMAL_1_2_SHORT_GAP_SHORT_PULSES 5620U
-#define MZF_NORMAL_1_3_LONG_GAP_SHORT_PULSES 15130U
-#define MZF_NORMAL_1_3_SHORT_GAP_SHORT_PULSES 7565U
+#define MZF_MZ800_SHORT_GAP_SHORT_PULSES 6344U
 #define MZF_MZ800_LONG_MARK_LONG_PULSES 40U
 #define MZF_MZ800_LONG_MARK_SHORT_PULSES 40U
 #define MZF_MZ800_SHORT_MARK_LONG_PULSES 20U
@@ -104,9 +100,9 @@
 #define MZF_IC_TURBO_START_DELAY_MS 345U
 #define MZF_MZ700_FAST3_START_DELAY_MS 400U
 #define MZF_TC_TURBO_START_DELAY_MS 110U
-#define MZF_IC_TURBO_GAP_SHORT_PULSES 2750U
-#define MZF_TC_1_3_TURBO_GAP_SHORT_PULSES 7565U
-#define MZF_TC_1_2_TURBO_GAP_SHORT_PULSES 5620U
+#define MZF_IC_TURBO_GAP_SHORT_PULSES 5500U
+#define MZF_TC_1_3_TURBO_GAP_SHORT_PULSES 15130U
+#define MZF_TC_1_2_TURBO_GAP_SHORT_PULSES 11239U
 #define MZF_IC_TURBO_MARK_LONG_PULSES 20U
 #define MZF_IC_TURBO_MARK_SHORT_PULSES 20U
 #define MZF_IC_TURBO_MARK_FINAL_LONG_PULSES 2U
@@ -682,16 +678,12 @@ static bool mzf_add_stage_duration(bool header_stage,
         if (short_period ==
             ((uint32_t)MZF_NORMAL_1_3_SHORT_TICKS * 2UL))
         {
-            gap_pulses = header_stage ?
-                MZF_NORMAL_1_3_LONG_GAP_SHORT_PULSES :
-                MZF_NORMAL_1_3_SHORT_GAP_SHORT_PULSES;
+            gap_pulses = MZF_TC_1_3_TURBO_GAP_SHORT_PULSES;
         }
         else if (short_period ==
                  ((uint32_t)MZF_NORMAL_1_2_SHORT_TICKS * 2UL))
         {
-            gap_pulses = header_stage ?
-                MZF_NORMAL_1_2_LONG_GAP_SHORT_PULSES :
-                MZF_NORMAL_1_2_SHORT_GAP_SHORT_PULSES;
+            gap_pulses = MZF_TC_1_2_TURBO_GAP_SHORT_PULSES;
         }
         else
         {
@@ -1278,9 +1270,9 @@ static uint16_t mzf_gap_short_pulses(void)
     if (mzf_stage == MZF_STAGE_HEADER)
     {
         if (mzf_normal_speed_divisor == 3U)
-            return MZF_NORMAL_1_3_LONG_GAP_SHORT_PULSES;
+            return MZF_TC_1_3_TURBO_GAP_SHORT_PULSES;
         if (mzf_normal_speed_divisor == 2U)
-            return MZF_NORMAL_1_2_LONG_GAP_SHORT_PULSES;
+            return MZF_TC_1_2_TURBO_GAP_SHORT_PULSES;
         return MZF_MZ800_LONG_GAP_SHORT_PULSES;
     }
     if (mzf_stage == MZF_STAGE_TAPE_TURBO_DATA)
@@ -1296,9 +1288,9 @@ static uint16_t mzf_gap_short_pulses(void)
         }
     }
     if (mzf_normal_speed_divisor == 3U)
-        return MZF_NORMAL_1_3_SHORT_GAP_SHORT_PULSES;
+        return MZF_TC_1_3_TURBO_GAP_SHORT_PULSES;
     if (mzf_normal_speed_divisor == 2U)
-        return MZF_NORMAL_1_2_SHORT_GAP_SHORT_PULSES;
+        return MZF_TC_1_2_TURBO_GAP_SHORT_PULSES;
     return MZF_MZ800_SHORT_GAP_SHORT_PULSES;
 }
 
